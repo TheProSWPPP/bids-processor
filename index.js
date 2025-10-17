@@ -4,7 +4,12 @@ const unzipper = require('unzipper');
 const xml2js = require('xml2js');
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 100 * 1024 * 1024 // 100MB limit - adjust as needed
+  }
+});
 const parser = new xml2js.Parser();
 
 app.get('/', (req, res) => {
@@ -12,21 +17,33 @@ app.get('/', (req, res) => {
 });
 
 app.post('/process', upload.single('file'), async (req, res) => {
+  console.log('=== Request received ===');
+  
   try {
     if (!req.file) {
+      console.log('ERROR: No file uploaded');
       return res.status(400).json({ error: 'No file uploaded' });
     }
+
+    console.log(`Processing file: ${req.file.originalname} (${req.file.size} bytes)`);
 
     const xmlFiles = [];
     const { Readable } = require('stream');
     const stream = Readable.from(req.file.buffer);
 
+    // Collect all XML processing promises
+    const processingPromises = [];
+
     await stream
       .pipe(unzipper.Parse())
-      .on('entry', async (entry) => {
+      .on('entry', (entry) => {
         if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
-          const chunks = [];
-          await new Promise((resolve) => {
+          console.log(`Found XML file: ${entry.path}`);
+          
+          // Create a promise for each XML file processing
+          const processingPromise = new Promise((resolve, reject) => {
+            const chunks = [];
+            
             entry
               .on('data', (chunk) => chunks.push(chunk))
               .on('end', async () => {
@@ -34,22 +51,36 @@ app.post('/process', upload.single('file'), async (req, res) => {
                   const xml = Buffer.concat(chunks).toString('utf8');
                   const parsed = await parser.parseStringPromise(xml);
                   const cleaned = cleanProjectData(parsed);
+                  
                   xmlFiles.push({
                     fileName: entry.path,
                     data: cleaned
                   });
+                  
+                  console.log(`Successfully processed: ${entry.path}`);
+                  resolve();
                 } catch (e) {
-                  console.error('Parse error:', e);
+                  console.error(`Parse error for ${entry.path}:`, e.message);
+                  resolve(); // Resolve anyway to continue processing other files
                 }
-                resolve();
               })
-              .on('error', resolve);
+              .on('error', (err) => {
+                console.error(`Stream error for ${entry.path}:`, err.message);
+                resolve(); // Resolve anyway to continue processing
+              });
           });
+          
+          processingPromises.push(processingPromise);
         } else {
           entry.autodrain();
         }
       })
       .promise();
+
+    // Wait for all XML files to be processed
+    await Promise.all(processingPromises);
+
+    console.log(`=== Processing complete: ${xmlFiles.length} files ===`);
 
     res.json({
       success: true,
@@ -57,7 +88,9 @@ app.post('/process', upload.single('file'), async (req, res) => {
       data: xmlFiles
     });
   } catch (error) {
-    console.error('Error:', error);
+    console.error('=== FATAL ERROR ===');
+    console.error('Error message:', error.message);
+    console.error('Stack trace:', error.stack);
     res.status(500).json({ error: error.message });
   }
 });
@@ -73,7 +106,7 @@ function ensureArray(data) {
 }
 
 /**
- * UPDATED: Cleans the parsed XML data for a project, now including
+ * Cleans the parsed XML data for a project, now including
  * bidder rank and a more inclusive project team (with Owners).
  * @param {object} data - The raw data object parsed from xml2js.
  * @returns {object} - A cleaned object containing project details.
@@ -94,7 +127,7 @@ function cleanProjectData(data) {
       updateDate: project.$?.UpdateDate,
       updateText: project.$?.UpdateText,
       prospectiveBidders: [],
-      projectTeam: [] // Renamed from designTeam
+      projectTeam: []
     };
 
     if (project.Companies && project.Companies[0].Company) {
@@ -126,12 +159,12 @@ function cleanProjectData(data) {
           };
         };
 
-         const getPhones = (c) => {
-            const phonesRaw = ensureArray(c.Phones?.[0]?.Phone);
-            return phonesRaw.map(phone => ({
-                type: phone.$?.PhoneType,
-                number: phone._
-            }));
+        const getPhones = (c) => {
+          const phonesRaw = ensureArray(c.Phones?.[0]?.Phone);
+          return phonesRaw.map(phone => ({
+            type: phone.$?.PhoneType,
+            number: phone._
+          }));
         };
 
         const cleanedCompany = {
@@ -145,21 +178,18 @@ function cleanProjectData(data) {
           phones: getPhones(company)
         };
 
-        // --- UPDATED LOGIC ---
-        // 1. Check if it's a bidder
+        // Check if it's a bidder
         if (company.$?.BiddingRole) {
           cleanedCompany.role = company.$?.BiddingRole;
-          // Extract the rank
           cleanedCompany.rank = company.ClassificationTypes?.[0]?.ClassificationType?.[0]?.$?.Rank;
           cleanedProject.prospectiveBidders.push(cleanedCompany);
         } else {
-          // 2. If not a bidder, check if it's a key project team member
+          // Check if it's a key project team member
           const projectTeamRoles = ['Architect', 'Engineer', 'Consultant', 'Owner', 'Tenant'];
           
-          // The role can be in the <Company> attribute OR in ClassificationTypes
           let companyRole = company.$?.Role;
           if (!companyRole) {
-              companyRole = company.ClassificationTypes?.[0]?.ClassificationType?.[0]?.$?.Type;
+            companyRole = company.ClassificationTypes?.[0]?.ClassificationType?.[0]?.$?.Type;
           }
 
           if (projectTeamRoles.includes(companyRole)) {
@@ -175,7 +205,6 @@ function cleanProjectData(data) {
 
   return { projects: cleanedProjects };
 }
-
 
 const PORT = process.env.PORT || 3080;
 app.listen(PORT, '0.0.0.0', () => {
