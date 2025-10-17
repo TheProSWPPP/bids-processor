@@ -12,9 +12,97 @@ const upload = multer({
 });
 const parser = new xml2js.Parser();
 
+// Middleware to parse JSON bodies
+app.use(express.json());
+
 app.get('/', (req, res) => {
   res.json({ status: 'Zip processor is running' });
 });
+
+/**
+ * Fetch all leads from Pipedrive with pagination
+ */
+async function fetchAllPipedriveLeads(apiToken) {
+  const allLeads = [];
+  let start = 0;
+  const limit = 500;
+  const filterId = 127;
+  
+  console.log('Fetching Pipedrive leads...');
+  
+  while (true) {
+    const url = `https://api.pipedrive.com/v1/leads?api_token=${apiToken}&filter_id=${filterId}&archived_status=not_archived&limit=${limit}&start=${start}`;
+    
+    try {
+      const response = await fetch(url);
+      const data = await response.json();
+      
+      if (!data.success || !data.data || data.data.length === 0) {
+        break;
+      }
+      
+      allLeads.push(...data.data);
+      console.log(`Fetched ${data.data.length} leads (total: ${allLeads.length})`);
+      
+      // Check if there are more results
+      if (!data.additional_data || !data.additional_data.pagination || !data.additional_data.pagination.more_items_in_collection) {
+        break;
+      }
+      
+      start = data.additional_data.pagination.next_start;
+    } catch (error) {
+      console.error('Error fetching Pipedrive leads:', error.message);
+      throw error;
+    }
+  }
+  
+  console.log(`Total Pipedrive leads fetched: ${allLeads.length}`);
+  return allLeads;
+}
+
+/**
+ * Extract project ID from URL
+ */
+function extractProjectId(url) {
+  if (!url) return null;
+  const match = url.match(/\/(\d+)\/\d+\/?/);
+  return match ? match[1] : null;
+}
+
+/**
+ * Match Pipedrive leads with Railway projects
+ */
+function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
+  // Create a Set of Railway project IDs for faster lookup
+  const railwayProjectIds = new Set(
+    railwayProjects.map(p => extractProjectId(p.url)).filter(id => id !== null)
+  );
+  
+  console.log(`Railway project IDs: ${railwayProjectIds.size}`);
+  
+  const matches = [];
+  
+  for (const lead of pipedriveLeads) {
+    // The custom field ID for the project URL in Pipedrive
+    const pipedriveUrl = lead["3fea11727cd0340a9eb1c3d18e0d4d15151fad38"];
+    const pipedriveProjectId = extractProjectId(pipedriveUrl);
+    
+    if (!pipedriveProjectId) continue;
+    
+    // Check if this project ID exists in Railway
+    if (railwayProjectIds.has(pipedriveProjectId)) {
+      const matchedProject = railwayProjects.find(p => extractProjectId(p.url) === pipedriveProjectId);
+      matches.push({
+        lead: lead,
+        matchedProject: matchedProject,
+        projectId: pipedriveProjectId
+      });
+    }
+  }
+  
+  console.log(`Found ${matches.length} matches between Pipedrive leads and Railway projects`);
+  return matches;
+}
 
 app.post('/process', upload.single('file'), async (req, res) => {
   console.log('=== Request received ===');
@@ -24,6 +112,9 @@ app.post('/process', upload.single('file'), async (req, res) => {
       console.log('ERROR: No file uploaded');
       return res.status(400).json({ error: 'No file uploaded' });
     }
+
+    // Use hardcoded Pipedrive API token
+    const pipedriveToken = '3089d0ffb03a7f996c5f10156fd4ebfaad9fca28';
 
     console.log(`Processing file: ${req.file.originalname} (${req.file.size} bytes)`);
 
@@ -80,12 +171,31 @@ app.post('/process', upload.single('file'), async (req, res) => {
     // Wait for all XML files to be processed
     await Promise.all(processingPromises);
 
-    console.log(`=== Processing complete: ${xmlFiles.length} files ===`);
+    console.log(`=== Processing complete: ${xmlFiles.length} XML files ===`);
+
+    // Extract all projects from XML files
+    const allRailwayProjects = [];
+    xmlFiles.forEach(file => {
+      if (file.data.projects && Array.isArray(file.data.projects)) {
+        allRailwayProjects.push(...file.data.projects);
+      }
+    });
+
+    console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
+
+    // Fetch Pipedrive leads
+    const pipedriveLeads = await fetchAllPipedriveLeads(pipedriveToken);
+
+    // Match leads with projects
+    const matches = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
 
     res.json({
       success: true,
       filesProcessed: xmlFiles.length,
-      data: xmlFiles
+      totalProjects: allRailwayProjects.length,
+      totalLeads: pipedriveLeads.length,
+      matchesFound: matches.length,
+      matches: matches
     });
   } catch (error) {
     console.error('=== FATAL ERROR ===');
