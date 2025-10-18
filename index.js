@@ -7,12 +7,11 @@ const app = express();
 const upload = multer({
     storage: multer.memoryStorage(),
     limits: {
-        fileSize: 100 * 1024 * 1024 // 100MB limit - adjust as needed
+        fileSize: 100 * 1024 * 1024 // 100MB limit
     }
 });
 const parser = new xml2js.Parser();
 
-// Middleware to parse JSON bodies
 app.use(express.json());
 
 app.get('/', (req, res) => {
@@ -21,279 +20,141 @@ app.get('/', (req, res) => {
     });
 });
 
-/**
- * Fetch all leads from Pipedrive with pagination
- */
 async function fetchAllPipedriveLeads(apiToken) {
     const allLeads = [];
     let start = 0;
     const limit = 500;
     const filterId = 127;
-
     console.log('Fetching Pipedrive leads...');
-
     while (true) {
         const url = `https://api.pipedrive.com/v1/leads?api_token=${apiToken}&filter_id=${filterId}&archived_status=not_archived&limit=${limit}&start=${start}`;
-
         try {
             const response = await fetch(url);
             const data = await response.json();
-
-            if (!data.success || !data.data || data.data.length === 0) {
-                break;
-            }
-
+            if (!data.success || !data.data || data.data.length === 0) break;
             allLeads.push(...data.data);
             console.log(`Fetched ${data.data.length} leads (total: ${allLeads.length})`);
-
-            // Check if there are more results
-            if (!data.additional_data || !data.additional_data.pagination || !data.additional_data.pagination.more_items_in_collection) {
-                break;
-            }
-
+            if (!data.additional_data?.pagination?.more_items_in_collection) break;
             start = data.additional_data.pagination.next_start;
         } catch (error) {
             console.error('Error fetching Pipedrive leads:', error.message);
             throw error;
         }
     }
-
     console.log(`Total Pipedrive leads fetched: ${allLeads.length}`);
     return allLeads;
 }
 
-/**
- * Extract project ID from URL
- */
 function extractProjectId(url) {
     if (!url) return null;
     const match = url.match(/\/(\d+)\/\d+\/?/);
     return match ? match[1] : null;
 }
 
-/**
- * Map Railway project stage to standardized stage code
- */
 function mapProjectStage(stage) {
     if (!stage) return stage;
-
-    if (stage === 'Pre-Bid' || stage === 'Bid Date Set' || stage === 'Biddate Set' ||
-        stage === 'Schematic Design' || stage === 'Design Development') {
-        return 'Bid Date Set';
-    }
-
-    if (stage === 'Open Bid' || stage === 'SUBBIDS: ASAP') {
-        return 'OB';
-    }
-
-    if (stage === 'Low Bid Apparent' || stage === 'Low Bid / Apparent' ||
-        stage === 'Low Bids Announced') {
-        return 'LBA';
-    }
-
-    if (stage === 'Post-Bid - General Contractor Award' ||
-        stage === 'Architectural General Contracting' ||
-        stage === 'General Contractor Award') {
-        return 'AGC';
-    }
-
-    if (stage === 'Post Bid') {
-        return 'PB';
-    }
-
-    if (stage === 'General Contract' || stage === 'Construction Underway') {
-        return 'GC';
-    }
-
-    if (stage === 'Construction Manager') {
-        return 'CM';
-    }
-
-    if (stage === 'Construction Documents' || stage === 'Pre-Design') {
-        return 'CD';
-    }
-
+    if (['Pre-Bid', 'Bid Date Set', 'Biddate Set', 'Schematic Design', 'Design Development'].includes(stage)) return 'Bid Date Set';
+    if (['Open Bid', 'SUBBIDS: ASAP'].includes(stage)) return 'OB';
+    if (['Low Bid Apparent', 'Low Bid / Apparent', 'Low Bids Announced'].includes(stage)) return 'LBA';
+    if (['Post-Bid - General Contractor Award', 'Architectural General Contracting', 'General Contractor Award'].includes(stage)) return 'AGC';
+    if (stage === 'Post Bid') return 'PB';
+    if (['General Contract', 'Construction Underway'].includes(stage)) return 'GC';
+    if (stage === 'Construction Manager') return 'CM';
+    if (['Construction Documents', 'Pre-Design'].includes(stage)) return 'CD';
     return stage;
 }
 
-/**
- * Match Pipedrive leads with Railway projects
- * Only returns matches where the stage has changed
- */
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
-    // Create a Map of Railway project IDs to projects for faster lookup
     const railwayProjectMap = new Map();
-
     railwayProjects.forEach(p => {
         const projectId = extractProjectId(p.url);
         if (projectId) {
             railwayProjectMap.set(projectId, p);
         }
     });
-
     console.log(`Railway projects mapped: ${railwayProjectMap.size}`);
-    console.log(`Sample Railway project IDs: ${Array.from(railwayProjectMap.keys()).slice(0, 5).join(', ')}`);
-
     const matches = [];
-    const stageMatches = [];
-    let leadsWithUrls = 0;
-    let leadsWithProjectIds = 0;
-
     for (const lead of pipedriveLeads) {
-        // The custom field ID for the project URL in Pipedrive
         const pipedriveUrl = lead["3fea11727cd0340a9eb1c3d18e0d4d15151fad38"];
-
         if (pipedriveUrl) {
-            leadsWithUrls++;
             const pipedriveProjectId = extractProjectId(pipedriveUrl);
+            if (!pipedriveProjectId || !railwayProjectMap.has(pipedriveProjectId)) continue;
 
-            if (pipedriveProjectId) {
-                leadsWithProjectIds++;
-            }
+            const matchedProject = railwayProjectMap.get(pipedriveProjectId);
+            const railwayMappedStage = mapProjectStage(matchedProject.stage);
+            const pipedriveStage = lead["7c1852c27664d1118f75660223a6af9e99d10f2c"];
 
-            if (!pipedriveProjectId) continue;
-
-            // Check if this project ID exists in Railway
-            if (railwayProjectMap.has(pipedriveProjectId)) {
-                const matchedProject = railwayProjectMap.get(pipedriveProjectId);
-
-                // Map the Railway project stage to standardized stage
-                const railwayMappedStage = mapProjectStage(matchedProject.stage);
-
-                // Get the current stage from Pipedrive lead (custom field 7c1852c27664d1118f75660223a6af9e99d10f2c)
-                const pipedriveStage = lead["7c1852c27664d1118f75660223a6af9e99d10f2c"];
-
-                const matchData = {
-                    lead: lead,
-                    matchedProject: matchedProject,
+            if (pipedriveStage !== railwayMappedStage) {
+                matches.push({
+                    lead,
+                    matchedProject,
                     projectId: pipedriveProjectId,
-                    pipedriveStage: pipedriveStage,
+                    pipedriveStage,
                     railwayStage: matchedProject.stage,
-                    railwayMappedStage: railwayMappedStage,
-                    stageChanged: pipedriveStage !== railwayMappedStage
-                };
-
-                stageMatches.push(matchData);
-
-                // Debug logging to see actual values
-                console.log(`Comparing Lead "${lead.title}":
-          - Pipedrive stage: "${pipedriveStage}"
-          - Railway original: "${matchedProject.stage}"
-          - Railway mapped: "${railwayMappedStage}"
-          - Are they different? ${pipedriveStage !== railwayMappedStage}`);
-
-                // Only include in final matches if stages are different
-                if (pipedriveStage !== railwayMappedStage) {
-                    console.log(`  ✓ MISMATCH - Adding to results`);
-                    matches.push(matchData);
-                } else {
-                    console.log(`  ✗ MATCH - Skipping (stages are the same)`);
-                }
+                    railwayMappedStage,
+                    stageChanged: true
+                });
             }
         }
     }
-
-    console.log(`\n=== Matching Statistics ===`);
-    console.log(`Total Pipedrive leads: ${pipedriveLeads.length}`);
-    console.log(`Leads with URLs: ${leadsWithUrls}`);
-    console.log(`Leads with extractable project IDs: ${leadsWithProjectIds}`);
-    console.log(`Sample Pipedrive project IDs: ${pipedriveLeads.slice(0, 5).map(l => extractProjectId(l["3fea11727cd0340a9eb1c3d18e0d4d15151fad38"])).filter(Boolean).join(', ')}`);
-    console.log(`Total matches found (same project in both systems): ${stageMatches.length}`);
-    console.log(`Matches with DIFFERENT stages (stage updates needed): ${matches.length}`);
-    console.log(`===========================\n`);
-
+    console.log(`Matches with DIFFERENT stages found: ${matches.length}`);
     return matches;
 }
 
 app.post('/process', upload.single('file'), async (req, res) => {
     console.log('=== Request received ===');
-
     try {
         if (!req.file) {
-            console.log('ERROR: No file uploaded');
             return res.status(400).json({
                 error: 'No file uploaded'
             });
         }
-
-        // Use hardcoded Pipedrive API token
         const pipedriveToken = '3089d0ffb03a7f996c5f10156fd4ebfaad9fca28';
-
         console.log(`Processing file: ${req.file.originalname} (${req.file.size} bytes)`);
-
         const xmlFiles = [];
         const {
             Readable
         } = require('stream');
         const stream = Readable.from(req.file.buffer);
-
-        // Collect all XML processing promises
         const processingPromises = [];
-
-        await stream
-            .pipe(unzipper.Parse())
-            .on('entry', (entry) => {
-                if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
-                    console.log(`Found XML file: ${entry.path}`);
-
-                    // Create a promise for each XML file processing
-                    const processingPromise = new Promise((resolve, reject) => {
-                        const chunks = [];
-
-                        entry
-                            .on('data', (chunk) => chunks.push(chunk))
-                            .on('end', async () => {
-                                try {
-                                    const xml = Buffer.concat(chunks).toString('utf8');
-                                    const parsed = await parser.parseStringPromise(xml);
-                                    const cleaned = cleanProjectData(parsed);
-
-                                    xmlFiles.push({
-                                        fileName: entry.path,
-                                        data: cleaned
-                                    });
-
-                                    console.log(`Successfully processed: ${entry.path}`);
-                                    resolve();
-                                } catch (e) {
-                                    console.error(`Parse error for ${entry.path}:`, e.message);
-                                    resolve(); // Resolve anyway to continue processing other files
-                                }
-                            })
-                            .on('error', (err) => {
-                                console.error(`Stream error for ${entry.path}:`, err.message);
-                                resolve(); // Resolve anyway to continue processing
+        await stream.pipe(unzipper.Parse()).on('entry', (entry) => {
+            if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
+                const processingPromise = new Promise((resolve) => {
+                    const chunks = [];
+                    entry.on('data', (chunk) => chunks.push(chunk)).on('end', async () => {
+                        try {
+                            const xml = Buffer.concat(chunks).toString('utf8');
+                            const parsed = await parser.parseStringPromise(xml);
+                            const cleaned = cleanProjectData(parsed);
+                            xmlFiles.push({
+                                fileName: entry.path,
+                                data: cleaned
                             });
+                        } catch (e) {
+                            console.error(`Parse error for ${entry.path}:`, e.message);
+                        }
+                        resolve();
+                    }).on('error', (err) => {
+                        console.error(`Stream error for ${entry.path}:`, err.message);
+                        resolve();
                     });
-
-                    processingPromises.push(processingPromise);
-                } else {
-                    entry.autodrain();
-                }
-            })
-            .promise();
-
-        // Wait for all XML files to be processed
+                });
+                processingPromises.push(processingPromise);
+            } else {
+                entry.autodrain();
+            }
+        }).promise();
         await Promise.all(processingPromises);
-
         console.log(`=== Processing complete: ${xmlFiles.length} XML files ===`);
-
-        // Extract all projects from XML files
         const allRailwayProjects = [];
         xmlFiles.forEach(file => {
             if (file.data.projects && Array.isArray(file.data.projects)) {
                 allRailwayProjects.push(...file.data.projects);
             }
         });
-
         console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
-
-        // Fetch Pipedrive leads
         const pipedriveLeads = await fetchAllPipedriveLeads(pipedriveToken);
-
-        // Match leads with projects
         const matches = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
-
         res.json({
             success: true,
             filesProcessed: xmlFiles.length,
@@ -303,9 +164,7 @@ app.post('/process', upload.single('file'), async (req, res) => {
             matches: matches
         });
     } catch (error) {
-        console.error('=== FATAL ERROR ===');
-        console.error('Error message:', error.message);
-        console.error('Stack trace:', error.stack);
+        console.error('=== FATAL ERROR ===', error);
         res.status(500).json({
             error: error.message
         });
@@ -314,10 +173,6 @@ app.post('/process', upload.single('file'), async (req, res) => {
 
 /**
  * Helper function to safely ensure a value is an array.
- * If the input is null or undefined, it returns an empty array.
- * If the input is not an array, it wraps it in an array.
- * @param {*} data - The data that might be a single object or an array.
- * @returns {Array} - An array representation of the data.
  */
 function ensureArray(data) {
     if (!data) return [];
@@ -325,17 +180,12 @@ function ensureArray(data) {
 }
 
 /**
- * Cleans the parsed XML data from a project file into a structured JSON format.
- * This improved version correctly extracts:
- * 1. Prospective Bidders, including their assigned rank.
- * 2. Key Project Team members, including roles like Architect, Engineer, Owner, and Tenant.
- * 3. Detailed contact, address, and phone information for each company.
- *
- * @param {object} data - The raw data object parsed from xml2js.
- * @returns {object} - A cleaned object containing an array of project details.
+ * Cleans the parsed XML data into a structured JSON format.
+ * This definitive version uses the attribute `BiddingRole="General Contractor"` as the
+ * sole criterion for identifying a "Prospective Bidder". All other companies
+ * (Owner, Architect, Low Bidder, etc.) are categorized as "Project Team".
  */
 function cleanProjectData(data) {
-    // Ensure the root structure and Project element(s) exist, otherwise return original data.
     if (!data.Projects || !data.Projects.Project) {
         return data;
     }
@@ -343,7 +193,6 @@ function cleanProjectData(data) {
     const projects = ensureArray(data.Projects.Project);
 
     const cleanedProjects = projects.map(project => {
-        // Initialize the structured object for the current project
         const cleanedProject = {
             projectId: project.$?.ProjectID,
             title: project.$?.Title,
@@ -351,15 +200,13 @@ function cleanProjectData(data) {
             url: project.$?.URL,
             updateDate: project.$?.UpdateDate,
             updateText: project.$?.UpdateText,
-            prospectiveBidders: [],
-            projectTeam: []
+            prospectiveBidders: [], // For companies with BiddingRole="General Contractor"
+            projectTeam: []         // For all other companies
         };
 
-        // Process the companies associated with the project
         const companies = ensureArray(project.Companies?.[0]?.Company);
 
         companies.forEach(company => {
-            // Helper to extract and clean contact information
             const getContacts = (c) => {
                 const contactsRaw = ensureArray(c.Contacts?.[0]?.Contact);
                 return contactsRaw.map(contact => ({
@@ -368,10 +215,8 @@ function cleanProjectData(data) {
                     email: contact.Email?.[0],
                     phone: contact.PhoneNumber?.[0],
                     linkedin: contact.LinkedInURL?.[0],
-                })).filter(c => c.name); // Only include contacts that have a name
+                })).filter(c => c.name);
             };
-
-            // Helper to extract and clean address information
             const getAddress = (c) => {
                 const addressRaw = ensureArray(c.Addresses?.[0]?.Address)[0];
                 if (!addressRaw) return null;
@@ -385,8 +230,6 @@ function cleanProjectData(data) {
                     county: addressRaw.County?.[0],
                 };
             };
-
-            // Helper to extract and clean phone numbers
             const getPhones = (c) => {
                 const phonesRaw = ensureArray(c.Phones?.[0]?.Phone);
                 return phonesRaw.map(phone => ({
@@ -395,7 +238,6 @@ function cleanProjectData(data) {
                 }));
             };
 
-            // Assemble the base company object
             const cleanedCompany = {
                 companyId: company.$?.CompanyID,
                 name: company.$?.Name,
@@ -406,39 +248,35 @@ function cleanProjectData(data) {
                 phones: getPhones(company)
             };
 
-            // Categorize the company as either a bidder or a project team member
-            if (company.$?.BiddingRole) {
-                // This company is a Prospective Bidder
+            const classifications = ensureArray(company.ClassificationTypes?.[0]?.ClassificationType);
+            const primaryClassification = classifications.find(c => c.$?.Rank === '1');
+
+            // THE DEFINITIVE LOGIC: Check for BiddingRole="General Contractor".
+            if (company.$?.BiddingRole === 'General Contractor') {
+                // This company is a Prospective Bidder.
                 cleanedCompany.role = company.$?.BiddingRole;
-                // Extract the bidder's rank from ClassificationTypes
-                cleanedCompany.rank = company.ClassificationTypes?.[0]?.ClassificationType?.[0]?.$?.Rank;
+                if (primaryClassification) {
+                    cleanedCompany.rank = primaryClassification.$.Rank;
+                }
                 cleanedProject.prospectiveBidders.push(cleanedCompany);
             } else {
-                // Check if this company is a key Project Team member
-                const projectTeamRoles = ['Architect', 'Engineer', 'Consultant', 'Owner', 'Tenant'];
-
-                // Determine the role, preferring the 'Role' attribute but falling back to the 'Type'
-                let companyRole = company.$?.Role;
-                if (!companyRole) {
-                    companyRole = company.ClassificationTypes?.[0]?.ClassificationType?.[0]?.$?.Type;
+                // This company is a Project Team member.
+                const role = company.$?.Role || primaryClassification?.$?.Type;
+                cleanedCompany.role = role;
+                if (primaryClassification) {
+                    cleanedCompany.rank = primaryClassification.$.Rank;
                 }
-
-                if (projectTeamRoles.includes(companyRole)) {
-                    cleanedCompany.role = companyRole;
-                    cleanedProject.projectTeam.push(cleanedCompany);
-                }
+                cleanedProject.projectTeam.push(cleanedCompany);
             }
         });
 
         return cleanedProject;
     });
 
-    // Return the final structured data
     return {
         projects: cleanedProjects
     };
 }
-
 
 const PORT = process.env.PORT || 3080;
 app.listen(PORT, '0.0.0.0', () => {
