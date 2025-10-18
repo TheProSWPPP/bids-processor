@@ -173,12 +173,19 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
         
         stageMatches.push(matchData);
         
+        // Debug logging to see actual values
+        console.log(`Comparing Lead "${lead.title}":
+          - Pipedrive stage: "${pipedriveStage}"
+          - Railway original: "${matchedProject.stage}"
+          - Railway mapped: "${railwayMappedStage}"
+          - Are they different? ${pipedriveStage !== railwayMappedStage}`);
+        
         // Only include in final matches if stages are different
         if (pipedriveStage !== railwayMappedStage) {
-          console.log(`MISMATCH: Lead "${lead.title}" - PD: "${pipedriveStage}" vs Railway: "${railwayMappedStage}" (original: "${matchedProject.stage}")`);
+          console.log(`  ✓ MISMATCH - Adding to results`);
           matches.push(matchData);
         } else {
-          console.log(`MATCH: Lead "${lead.title}" - Both stages are "${pipedriveStage}"`);
+          console.log(`  ✗ MATCH - Skipping (stages are the same)`);
         }
       }
     }
