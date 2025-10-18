@@ -70,7 +70,53 @@ function extractProjectId(url) {
 }
 
 /**
+ * Map Railway project stage to standardized stage code
+ */
+function mapProjectStage(stage) {
+  if (!stage) return stage;
+  
+  if (stage === 'Pre-Bid' || stage === 'Bid Date Set' || stage === 'Biddate Set' || 
+      stage === 'Schematic Design' || stage === 'Design Development') {
+    return 'Bid Date Set';
+  }
+  
+  if (stage === 'Open Bid' || stage === 'SUBBIDS: ASAP') {
+    return 'OB';
+  }
+  
+  if (stage === 'Low Bid Apparent' || stage === 'Low Bid / Apparent' || 
+      stage === 'Low Bids Announced') {
+    return 'LBA';
+  }
+  
+  if (stage === 'Post-Bid - General Contractor Award' || 
+      stage === 'Architectural General Contracting' || 
+      stage === 'General Contractor Award') {
+    return 'AGC';
+  }
+  
+  if (stage === 'Post Bid') {
+    return 'PB';
+  }
+  
+  if (stage === 'General Contract' || stage === 'Construction Underway') {
+    return 'GC';
+  }
+  
+  if (stage === 'Construction Manager') {
+    return 'CM';
+  }
+  
+  if (stage === 'Construction Documents' || stage === 'Pre-Design') {
+    return 'CD';
+  }
+  
+  return stage;
+}
+
+/**
  * Match Pipedrive leads with Railway projects
+ * Only returns matches where the stage has changed
  */
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
   // Create a Set of Railway project IDs for faster lookup
@@ -81,6 +127,7 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
   console.log(`Railway project IDs: ${railwayProjectIds.size}`);
   
   const matches = [];
+  const stageMatches = [];
   
   for (const lead of pipedriveLeads) {
     // The custom field ID for the project URL in Pipedrive
@@ -92,15 +139,34 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     // Check if this project ID exists in Railway
     if (railwayProjectIds.has(pipedriveProjectId)) {
       const matchedProject = railwayProjects.find(p => extractProjectId(p.url) === pipedriveProjectId);
-      matches.push({
+      
+      // Map the Railway project stage to standardized stage
+      const railwayMappedStage = mapProjectStage(matchedProject.stage);
+      
+      // Get the current stage from Pipedrive lead (custom field 7c1852c27664d1118f75660223a6af9e99d10f2c)
+      const pipedriveStage = lead["7c1852c27664d1118f75660223a6af9e99d10f2c"];
+      
+      const matchData = {
         lead: lead,
         matchedProject: matchedProject,
-        projectId: pipedriveProjectId
-      });
+        projectId: pipedriveProjectId,
+        pipedriveStage: pipedriveStage,
+        railwayStage: matchedProject.stage,
+        railwayMappedStage: railwayMappedStage,
+        stageChanged: pipedriveStage !== railwayMappedStage
+      };
+      
+      stageMatches.push(matchData);
+      
+      // Only include in final matches if stages are different
+      if (pipedriveStage !== railwayMappedStage) {
+        matches.push(matchData);
+      }
     }
   }
   
-  console.log(`Found ${matches.length} matches between Pipedrive leads and Railway projects`);
+  console.log(`Found ${stageMatches.length} total matches between Pipedrive leads and Railway projects`);
+  console.log(`Found ${matches.length} matches with DIFFERENT stages (stage updates needed)`);
   return matches;
 }
 
