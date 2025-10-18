@@ -67,7 +67,8 @@ function mapProjectStage(stage) {
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     const railwayProjectMap = new Map();
     railwayProjects.forEach(p => {
-        const projectId = extractProjectId(p.url);
+        // The project object now has URL directly from the attributes
+        const projectId = extractProjectId(p.URL);
         if (projectId) {
             railwayProjectMap.set(projectId, p);
         }
@@ -81,7 +82,7 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
             if (!pipedriveProjectId || !railwayProjectMap.has(pipedriveProjectId)) continue;
 
             const matchedProject = railwayProjectMap.get(pipedriveProjectId);
-            const railwayMappedStage = mapProjectStage(matchedProject.stage);
+            const railwayMappedStage = mapProjectStage(matchedProject.Stage); // Note: Property name is now 'Stage'
             const pipedriveStage = lead["7c1852c27664d1118f75660223a6af9e99d10f2c"];
 
             if (pipedriveStage !== railwayMappedStage) {
@@ -90,7 +91,7 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
                     matchedProject,
                     projectId: pipedriveProjectId,
                     pipedriveStage,
-                    railwayStage: matchedProject.stage,
+                    railwayStage: matchedProject.Stage,
                     railwayMappedStage,
                     stageChanged: true
                 });
@@ -181,9 +182,9 @@ function ensureArray(data) {
 
 /**
  * Cleans the parsed XML data into a structured JSON format.
- * This definitive version uses the attribute `BiddingRole="General Contractor"` as the
- * sole criterion for identifying a "Prospective Bidder". All other companies
- * (Owner, Architect, Low Bidder, etc.) are categorized as "Project Team".
+ * This version returns all available fields for every company in a single 'companies'
+ * array, including all attributes and classification types, without attempting
+ * to categorize them.
  */
 function cleanProjectData(data) {
     if (!data.Projects || !data.Projects.Project) {
@@ -193,82 +194,66 @@ function cleanProjectData(data) {
     const projects = ensureArray(data.Projects.Project);
 
     const cleanedProjects = projects.map(project => {
-        const cleanedProject = {
-            projectId: project.$?.ProjectID,
-            title: project.$?.Title,
-            stage: project.$?.Stage,
-            url: project.$?.URL,
-            updateDate: project.$?.UpdateDate,
-            updateText: project.$?.UpdateText,
-            prospectiveBidders: [], // For companies with BiddingRole="General Contractor"
-            projectTeam: []         // For all other companies
+        // Start with all top-level project attributes
+        const cleanedProject = { ...project.$ };
+
+        // Helper functions
+        const getContacts = (c) => {
+            const contactsRaw = ensureArray(c.Contacts?.[0]?.Contact);
+            return contactsRaw.map(contact => ({
+                ...contact.$, // Include all attributes like ContactID and Name
+                ...(contact.Email && { email: contact.Email[0] }),
+                ...(contact.PhoneNumber && { phone: contact.PhoneNumber[0] }),
+                ...(contact.LinkedInURL && { linkedin: contact.LinkedInURL[0] }),
+            }));
         };
 
-        const companies = ensureArray(project.Companies?.[0]?.Company);
+        const getAddress = (c) => {
+            const addressRaw = ensureArray(c.Addresses?.[0]?.Address)[0];
+            if (!addressRaw) return null;
+            return {
+                ...addressRaw.$,
+                addressLine1: addressRaw.AddressLine1?.[0],
+                addressLine2: addressRaw.AddressLine2?.[0],
+                city: addressRaw.City?.[0],
+                state: addressRaw.StateProvince?.[0],
+                zip: addressRaw.ZipPostalCode?.[0],
+                county: addressRaw.County?.[0],
+            };
+        };
 
-        companies.forEach(company => {
-            const getContacts = (c) => {
-                const contactsRaw = ensureArray(c.Contacts?.[0]?.Contact);
-                return contactsRaw.map(contact => ({
-                    contactId: contact.$?.ContactID,
-                    name: contact.$?.Name,
-                    email: contact.Email?.[0],
-                    phone: contact.PhoneNumber?.[0],
-                    linkedin: contact.LinkedInURL?.[0],
-                })).filter(c => c.name);
-            };
-            const getAddress = (c) => {
-                const addressRaw = ensureArray(c.Addresses?.[0]?.Address)[0];
-                if (!addressRaw) return null;
-                return {
-                    type: addressRaw.$?.AddressType,
-                    addressLine1: addressRaw.AddressLine1?.[0],
-                    addressLine2: addressRaw.AddressLine2?.[0],
-                    city: addressRaw.City?.[0],
-                    state: addressRaw.StateProvince?.[0],
-                    zip: addressRaw.ZipPostalCode?.[0],
-                    county: addressRaw.County?.[0],
-                };
-            };
-            const getPhones = (c) => {
-                const phonesRaw = ensureArray(c.Phones?.[0]?.Phone);
-                return phonesRaw.map(phone => ({
-                    type: phone.$?.PhoneType,
-                    number: phone._
-                }));
-            };
+        const getPhones = (c) => {
+            const phonesRaw = ensureArray(c.Phones?.[0]?.Phone);
+            return phonesRaw.map(phone => ({
+                type: phone.$?.PhoneType,
+                number: phone._
+            }));
+        };
 
-            const cleanedCompany = {
-                companyId: company.$?.CompanyID,
-                name: company.$?.Name,
-                url: company.$?.URL,
+        const companiesRaw = ensureArray(project.Companies?.[0]?.Company);
+        
+        // Create a single 'companies' array
+        cleanedProject.companies = companiesRaw.map(company => {
+            const classificationsRaw = ensureArray(company.ClassificationTypes?.[0]?.ClassificationType);
+            const classifications = classificationsRaw.map(ct => ({
+                rank: ct.$?.Rank,
+                type: ct.$?.Type
+            }));
+
+            // Return a comprehensive company object
+            return {
+                ...company.$, // Captures all attributes like CompanyID, Role, BiddingRole
                 website: company.Website?.[0],
                 contacts: getContacts(company),
                 address: getAddress(company),
-                phones: getPhones(company)
+                phones: getPhones(company),
+                classificationTypes: classifications
             };
-
-            const classifications = ensureArray(company.ClassificationTypes?.[0]?.ClassificationType);
-            const primaryClassification = classifications.find(c => c.$?.Rank === '1');
-
-            // THE DEFINITIVE LOGIC: Check for BiddingRole="General Contractor".
-            if (company.$?.BiddingRole === 'General Contractor') {
-                // This company is a Prospective Bidder.
-                cleanedCompany.role = company.$?.BiddingRole;
-                if (primaryClassification) {
-                    cleanedCompany.rank = primaryClassification.$.Rank;
-                }
-                cleanedProject.prospectiveBidders.push(cleanedCompany);
-            } else {
-                // This company is a Project Team member.
-                const role = company.$?.Role || primaryClassification?.$?.Type;
-                cleanedCompany.role = role;
-                if (primaryClassification) {
-                    cleanedCompany.rank = primaryClassification.$.Rank;
-                }
-                cleanedProject.projectTeam.push(cleanedCompany);
-            }
         });
+
+        // Add other project-level details if they exist
+        if(project.Valuation) cleanedProject.valuation = project.Valuation[0].$;
+        if(project.Parameters) cleanedProject.parameters = project.Parameters[0].$;
 
         return cleanedProject;
     });
@@ -277,6 +262,7 @@ function cleanProjectData(data) {
         projects: cleanedProjects
     };
 }
+
 
 const PORT = process.env.PORT || 3080;
 app.listen(PORT, '0.0.0.0', () => {
