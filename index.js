@@ -53,7 +53,7 @@ function extractProjectId(url) {
 
 function mapProjectStage(stage) {
     if (!stage) return stage;
-    if (['Pre-Bid', 'Bid Date Set', 'Biddate Set', 'Schematic Design', 'Design Development'].includes(stage)) return 'Bid Date Set';
+    if (['Pre-Bid', 'Bid Date Set', 'Biddate Set', 'Schematic Design', 'Design Development'].includes(stage)) return 'Pre-Bid';
     if (['Open Bid', 'SUBBIDS: ASAP'].includes(stage)) return 'OB';
     if (['Low Bid Apparent', 'Low Bid / Apparent', 'Low Bids Announced'].includes(stage)) return 'LBA';
     if (['Post-Bid - General Contractor Award', 'Architectural General Contracting', 'General Contractor Award'].includes(stage)) return 'AGC';
