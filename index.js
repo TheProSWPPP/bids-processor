@@ -243,6 +243,7 @@ function cleanProjectData(data) {
             // Return a comprehensive company object
             return {
                 ...company.$, // Captures all attributes like CompanyID, Role, BiddingRole
+                email: company.Email?.[0], // <<< ADD THIS LINE
                 website: company.Website?.[0],
                 contacts: getContacts(company),
                 address: getAddress(company),
