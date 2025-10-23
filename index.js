@@ -64,15 +64,43 @@ function mapProjectStage(stage) {
     return stage;
 }
 
+// *** FIX: This function now merges duplicate project records instead of overwriting them. ***
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     const railwayProjectMap = new Map();
+
     railwayProjects.forEach(p => {
         const projectId = extractProjectId(p.URL);
-        if (projectId) {
+        if (!projectId) return;
+
+        if (railwayProjectMap.has(projectId)) {
+            // Project already exists, so we merge company data.
+            const existingProject = railwayProjectMap.get(projectId);
+            const existingCompanyIds = new Set(existingProject.companies.map(c => c.CompanyID));
+
+            // Add any new companies that aren't already in the list
+            if (p.companies) {
+                p.companies.forEach(newCompany => {
+                    if (!existingCompanyIds.has(newCompany.CompanyID)) {
+                        existingProject.companies.push(newCompany);
+                        existingCompanyIds.add(newCompany.CompanyID); // Update the set for efficiency
+                    }
+                });
+            }
+
+            // Optionally, update the main project record if the new one is more recent
+            if (new Date(p.UpdateDate) > new Date(existingProject.UpdateDate)) {
+                const mergedCompanies = existingProject.companies; // Keep the merged company list
+                Object.assign(existingProject, p, { companies: mergedCompanies }); // Overwrite top-level fields but keep merged companies
+            }
+
+        } else {
+            // First time seeing this project, add it to the map
             railwayProjectMap.set(projectId, p);
         }
     });
-    console.log(`Railway projects mapped: ${railwayProjectMap.size}`);
+    // *** END FIX ***
+    
+    console.log(`Railway projects mapped (after merging): ${railwayProjectMap.size}`);
     const matches = [];
     for (const lead of pipedriveLeads) {
         const pipedriveUrl = lead["3fea11727cd0340a9eb1c3d18e0d4d15151fad38"];
@@ -174,6 +202,7 @@ function cleanProject(project) {
         }));
     };
 
+    cleanedProject.companies = []; // Initialize as an empty array
     if (project.Companies && project.Companies.Company) {
         const companiesRaw = Array.isArray(project.Companies.Company) ? project.Companies.Company : [project.Companies.Company];
         
@@ -192,15 +221,17 @@ function cleanProject(project) {
                 });
             }
 
+            // *** FIX: This object now includes the company-level email ***
             return {
                 ...company.$,
-                email: company.Email,
+                email: company.Email, // This captures the main company email
                 website: company.Website,
                 contacts: getContacts(company),
                 address: getAddress(company),
                 phones: getPhones(company),
                 classificationTypes: classifications
             };
+            // *** END FIX ***
         });
     }
 
@@ -226,7 +257,9 @@ app.post('/process', upload.single('file'), async (req, res) => {
         
         let filesProcessed = 0;
 
-        await stream.pipe(unzipper.Parse()).on('entry', async (entry) => {
+        const unzipperStream = stream.pipe(unzipper.Parse());
+        
+        for await (const entry of unzipperStream) {
             if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
                 console.log(`Processing XML file: ${entry.path}`);
                 try {
@@ -235,11 +268,12 @@ app.post('/process', upload.single('file'), async (req, res) => {
                     filesProcessed++;
                 } catch (e) {
                     console.error(`Parse error for ${entry.path}:`, e.message);
+                    entry.autodrain();
                 }
             } else {
                 entry.autodrain();
             }
-        }).promise();
+        }
 
         console.log(`=== Processing complete: ${filesProcessed} XML files ===`);
         console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
