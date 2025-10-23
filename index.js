@@ -64,7 +64,7 @@ function mapProjectStage(stage) {
     return stage;
 }
 
-// *** FIXED: This function now correctly merges company data from duplicate projects ***
+// *** THIS IS THE CORRECTED FUNCTION THAT MERGES COMPANIES ***
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     const railwayProjectMap = new Map();
 
@@ -73,11 +73,11 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
         if (!projectId) return;
 
         if (railwayProjectMap.has(projectId)) {
-            // Project already exists, so we merge the company lists.
+            // Project exists, so merge companies
             const existingProject = railwayProjectMap.get(projectId);
             const existingCompanyIds = new Set(existingProject.companies.map(c => c.CompanyID));
 
-            // Add any new companies that aren't already in the existing list
+            // Add new, unique companies from the current project 'p'
             if (p.companies) {
                 p.companies.forEach(newCompany => {
                     if (!existingCompanyIds.has(newCompany.CompanyID)) {
@@ -89,7 +89,7 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
 
             // Update the main project record if the new one is more recent
             if (new Date(p.UpdateDate) > new Date(existingProject.UpdateDate)) {
-                const mergedCompanies = existingProject.companies; // Preserve the merged list
+                const mergedCompanies = existingProject.companies; // Keep the merged company list
                 Object.assign(existingProject, p, { companies: mergedCompanies });
             }
         } else {
@@ -97,7 +97,6 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
             railwayProjectMap.set(projectId, p);
         }
     });
-    // *** END FIX ***
 
     console.log(`Railway projects mapped (after merging): ${railwayProjectMap.size}`);
     const matches = [];
@@ -222,7 +221,7 @@ function cleanProject(project) {
 
             return {
                 ...company.$,
-                email: company.Email,
+                email: company.Email, // Correctly captures company email
                 website: company.Website,
                 contacts: getContacts(company),
                 address: getAddress(company),
@@ -255,25 +254,24 @@ app.post('/process', upload.single('file'), async (req, res) => {
         let filesProcessed = 0;
         const processingPromises = [];
 
-        await stream.pipe(unzipper.Parse()).on('entry', (entry) => {
+        const unzipperStream = stream.pipe(unzipper.Parse());
+
+        // Use a for...await...of loop for better stream handling
+        for await (const entry of unzipperStream) {
             if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
                 console.log(`Processing XML file: ${entry.path}`);
-                const promise = processXmlStream(entry, entry.path)
-                    .then(projects => {
-                        allRailwayProjects.push(...projects);
-                        filesProcessed++;
-                    })
-                    .catch(e => {
-                        console.error(`Parse error for ${entry.path}:`, e.message);
-                    });
-                processingPromises.push(promise);
+                try {
+                    const projects = await processXmlStream(entry, entry.path);
+                    allRailwayProjects.push(...projects);
+                    filesProcessed++;
+                } catch (e) {
+                    console.error(`Parse error for ${entry.path}:`, e.message);
+                    entry.autodrain(); // Ensure stream continues
+                }
             } else {
                 entry.autodrain();
             }
-        }).promise();
-
-        // Wait for all XML processing to complete
-        await Promise.all(processingPromises);
+        }
 
         console.log(`=== Processing complete: ${filesProcessed} XML files ===`);
         console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
