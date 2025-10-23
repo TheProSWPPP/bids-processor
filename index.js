@@ -160,6 +160,13 @@ async function processXmlStream(stream, fileName) {
         const projects = [];
         const xml = new XmlStream(stream);
         
+        // CRITICAL FIX: Tell xml-stream to collect all Company elements into an array
+        xml.collect('Company');
+        xml.collect('Contact');
+        xml.collect('Address');
+        xml.collect('Phone');
+        xml.collect('ClassificationType');
+        
         let projectCount = 0;
         let lastLog = Date.now();
 
@@ -291,7 +298,7 @@ function cleanProject(project, debug = false) {
             };
             
             if (debug) {
-                console.log(`  Company ${idx + 1}/${companiesRaw.length}: ${company.$?.Name || 'Unknown'} (${company.$?.Role || company.$?.BiddingRole || 'No role'})`);
+                console.log(`  Company ${idx + 1}/${companiesRaw.length}: ${company.$?.Name || 'Unknown'} (${company.$?.Role || company.$?.BiddingRole || 'No role'}) - Email: ${company.Email || 'NONE'}`);
             }
             
             return cleanedCompany;
