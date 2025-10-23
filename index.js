@@ -64,17 +64,22 @@ function mapProjectStage(stage) {
     return stage;
 }
 
-// *** THIS IS THE CORRECTED FUNCTION THAT MERGES COMPANIES ***
+// *** THIS IS THE CORRECTED FUNCTION THAT MERGES COMPANIES - WITH DEBUG LOGGING ***
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     const railwayProjectMap = new Map();
+    const projectOccurrences = new Map(); // Track how many times we see each project
 
     railwayProjects.forEach(p => {
         const projectId = extractProjectId(p.URL);
         if (!projectId) return;
 
+        // Track occurrences
+        projectOccurrences.set(projectId, (projectOccurrences.get(projectId) || 0) + 1);
+
         if (railwayProjectMap.has(projectId)) {
             // Project exists, so merge companies
             const existingProject = railwayProjectMap.get(projectId);
+            const beforeCount = existingProject.companies.length;
             const existingCompanyIds = new Set(existingProject.companies.map(c => c.CompanyID));
 
             // Add new, unique companies from the current project 'p'
@@ -87,6 +92,11 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
                 });
             }
 
+            const afterCount = existingProject.companies.length;
+            if (afterCount > beforeCount) {
+                console.log(`  Merged companies for project ${projectId}: ${beforeCount} → ${afterCount}`);
+            }
+
             // Update the main project record if the new one is more recent
             if (new Date(p.UpdateDate) > new Date(existingProject.UpdateDate)) {
                 const mergedCompanies = existingProject.companies; // Keep the merged company list
@@ -97,6 +107,21 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
             railwayProjectMap.set(projectId, p);
         }
     });
+
+    // Log projects that appeared multiple times
+    const duplicates = Array.from(projectOccurrences.entries()).filter(([id, count]) => count > 1);
+    if (duplicates.length > 0) {
+        console.log(`\n📊 Projects with multiple entries (company merging happened):`);
+        duplicates.slice(0, 10).forEach(([id, count]) => {
+            const project = railwayProjectMap.get(id);
+            console.log(`  - Project ${id}: appeared ${count} times, merged to ${project.companies.length} companies`);
+        });
+        if (duplicates.length > 10) {
+            console.log(`  ... and ${duplicates.length - 10} more`);
+        }
+    } else {
+        console.log(`\n⚠️  No duplicate projects found - each project appears only once in the XML`);
+    }
 
     console.log(`Railway projects mapped (after merging): ${railwayProjectMap.size}`);
     const matches = [];
@@ -149,7 +174,7 @@ async function processXmlStream(stream, fileName) {
             }
 
             try {
-                const cleanedProject = cleanProject(project);
+                const cleanedProject = cleanProject(project, projectCount === 1); // Debug first project only
                 projects.push(cleanedProject);
             } catch (err) {
                 console.error(`Error cleaning project ${projectCount} in ${fileName}:`, err.message);
@@ -169,10 +194,33 @@ async function processXmlStream(stream, fileName) {
 }
 
 /**
- * Clean a single project node from the XML stream
+ * Clean a single project node from the XML stream - WITH DEBUG LOGGING
  */
-function cleanProject(project) {
+function cleanProject(project, debug = false) {
     const cleanedProject = { ...project.$ };
+
+    // DEBUG: Log the raw project structure for first project only
+    if (debug && project.Companies) {
+        console.log(`\n=== DEBUG Project ${cleanedProject.ProjectID} ===`);
+        
+        if (project.Companies.Company) {
+            const isArray = Array.isArray(project.Companies.Company);
+            const count = isArray ? project.Companies.Company.length : 1;
+            console.log(`Companies.Company is ${isArray ? 'ARRAY' : 'OBJECT'} with ${count} item(s)`);
+            
+            // Show first few company names
+            if (isArray && project.Companies.Company.length > 0) {
+                console.log('First 3 companies:');
+                project.Companies.Company.slice(0, 3).forEach((c, i) => {
+                    console.log(`  ${i + 1}. ${c.$?.Name || 'Unknown'} (${c.$?.Role || c.$?.BiddingRole || 'No role'})`);
+                });
+            } else if (!isArray) {
+                console.log(`Single company: ${project.Companies.Company.$?.Name || 'Unknown'}`);
+            }
+        } else {
+            console.log('WARNING: Companies exists but Company is undefined!');
+        }
+    }
 
     const getContacts = (c) => {
         if (!c || !c.Contacts || !c.Contacts.Contact) return [];
@@ -213,7 +261,11 @@ function cleanProject(project) {
     if (project.Companies && project.Companies.Company) {
         const companiesRaw = Array.isArray(project.Companies.Company) ? project.Companies.Company : [project.Companies.Company];
         
-        cleanedProject.companies = companiesRaw.map(company => {
+        if (debug) {
+            console.log(`Processing ${companiesRaw.length} companies for project ${cleanedProject.ProjectID}`);
+        }
+        
+        cleanedProject.companies = companiesRaw.map((company, idx) => {
             const classifications = [];
             if (company.ClassificationTypes && company.ClassificationTypes.ClassificationType) {
                 const classificationsRaw = Array.isArray(company.ClassificationTypes.ClassificationType) 
@@ -228,7 +280,7 @@ function cleanProject(project) {
                 });
             }
 
-            return {
+            const cleanedCompany = {
                 ...company.$,
                 email: company.Email,
                 website: company.Website,
@@ -237,7 +289,17 @@ function cleanProject(project) {
                 phones: getPhones(company),
                 classificationTypes: classifications
             };
+            
+            if (debug) {
+                console.log(`  Company ${idx + 1}/${companiesRaw.length}: ${company.$?.Name || 'Unknown'} (${company.$?.Role || company.$?.BiddingRole || 'No role'})`);
+            }
+            
+            return cleanedCompany;
         });
+        
+        if (debug) {
+            console.log(`✓ Extracted ${cleanedProject.companies.length} companies for project ${cleanedProject.ProjectID}\n`);
+        }
     }
 
     if (project.Valuation) cleanedProject.valuation = project.Valuation.$;
@@ -347,5 +409,5 @@ app.post('/process', upload.single('file'), async (req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
-    console.log(`Max heap size: ${process.memoryUsage().heapTotal / 1024 / 1024}MB`);
+    console.log(`Max heap size: ${process.env.NODE_OPTIONS || 'default'}`);
 });
