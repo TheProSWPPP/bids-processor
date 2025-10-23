@@ -64,7 +64,7 @@ function mapProjectStage(stage) {
     return stage;
 }
 
-// *** THIS IS THE CORRECTED FUNCTION THAT MERGES COMPANIES - WITH DEBUG LOGGING ***
+// *** FIX START: Replaced the overwriting function with the correct merging function ***
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     const railwayProjectMap = new Map();
     const projectOccurrences = new Map(); // Track how many times we see each project
@@ -151,21 +151,20 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     console.log(`Matches with DIFFERENT stages found: ${matches.length}`);
     return matches;
 }
+// *** FIX END ***
 
-/**
- * Process XML file using streaming parser to handle large files
- */
 async function processXmlStream(stream, fileName) {
     return new Promise((resolve, reject) => {
         const projects = [];
         const xml = new XmlStream(stream);
         
-        // CRITICAL FIX: Tell xml-stream to collect all Company elements into an array
         xml.collect('Company');
         xml.collect('Contact');
         xml.collect('Address');
         xml.collect('Phone');
         xml.collect('ClassificationType');
+        xml.collect('ParticipantRole');
+        xml.collect('Bidder');
         
         let projectCount = 0;
         let lastLog = Date.now();
@@ -173,7 +172,6 @@ async function processXmlStream(stream, fileName) {
         xml.on('endElement: Project', (project) => {
             projectCount++;
             
-            // Log every 1000 projects OR every 5 seconds
             const now = Date.now();
             if (projectCount % 1000 === 0 || now - lastLog > 5000) {
                 console.log(`Processing ${fileName}: ${projectCount} projects...`);
@@ -181,7 +179,7 @@ async function processXmlStream(stream, fileName) {
             }
 
             try {
-                const cleanedProject = cleanProject(project, projectCount === 1); // Debug first project only
+                const cleanedProject = cleanProject(project, projectCount === 1);
                 projects.push(cleanedProject);
             } catch (err) {
                 console.error(`Error cleaning project ${projectCount} in ${fileName}:`, err.message);
@@ -200,13 +198,9 @@ async function processXmlStream(stream, fileName) {
     });
 }
 
-/**
- * Clean a single project node from the XML stream - WITH DEBUG LOGGING
- */
 function cleanProject(project, debug = false) {
     const cleanedProject = { ...project.$ };
 
-    // DEBUG: Log the raw project structure for first project only
     if (debug && project.Companies) {
         console.log(`\n=== DEBUG Project ${cleanedProject.ProjectID} ===`);
         
@@ -215,7 +209,6 @@ function cleanProject(project, debug = false) {
             const count = isArray ? project.Companies.Company.length : 1;
             console.log(`Companies.Company is ${isArray ? 'ARRAY' : 'OBJECT'} with ${count} item(s)`);
             
-            // Show first few company names
             if (isArray && project.Companies.Company.length > 0) {
                 console.log('First 3 companies:');
                 project.Companies.Company.slice(0, 3).forEach((c, i) => {
@@ -255,16 +248,30 @@ function cleanProject(project, debug = false) {
         };
     };
 
+    // *** FIX START: Corrected how the phone number is extracted ***
     const getPhones = (c) => {
         if (!c || !c.Phones || !c.Phones.Phone) return [];
         const phones = Array.isArray(c.Phones.Phone) ? c.Phones.Phone : [c.Phones.Phone];
         return phones.map(phone => ({
             type: phone.$?.PhoneType,
-            number: phone.$children?.[0] || phone._
+            number: phone.$text // Use $text for xml-stream
         }));
     };
+    // *** FIX END ***
 
-    cleanedProject.companies = []; // Initialize as empty
+    const getParticipantRoles = (c) => {
+        if (!c || !c.ParticipantRoles || !c.ParticipantRoles.ParticipantRole) return [];
+        const roles = Array.isArray(c.ParticipantRoles.ParticipantRole) ? c.ParticipantRoles.ParticipantRole : [c.ParticipantRoles.ParticipantRole];
+        return roles.map(role => role.$);
+    };
+
+    const getBidderRoles = (c) => {
+        if (!c || !c.BidderRoles || !c.BidderRoles.Bidder) return [];
+        const roles = Array.isArray(c.BidderRoles.Bidder) ? c.BidderRoles.Bidder : [c.BidderRoles.Bidder];
+        return roles.map(role => role.$);
+    };
+
+    cleanedProject.companies = [];
     if (project.Companies && project.Companies.Company) {
         const companiesRaw = Array.isArray(project.Companies.Company) ? project.Companies.Company : [project.Companies.Company];
         
@@ -294,7 +301,9 @@ function cleanProject(project, debug = false) {
                 contacts: getContacts(company),
                 address: getAddress(company),
                 phones: getPhones(company),
-                classificationTypes: classifications
+                classificationTypes: classifications,
+                participantRoles: getParticipantRoles(company),
+                bidderRoles: getBidderRoles(company)
             };
             
             if (debug) {
@@ -328,7 +337,6 @@ app.post('/process', upload.single('file'), async (req, res) => {
         
         const pipedriveToken = '3089d0ffb03a7f996c5f10156fd4ebfaad9fca28';
         console.log(`Processing file: ${req.file.originalname} (${req.file.size} bytes)`);
-        console.log('Starting unzip...');
         
         const allRailwayProjects = [];
         const stream = Readable.from(req.file.buffer);
@@ -336,58 +344,30 @@ app.post('/process', upload.single('file'), async (req, res) => {
         let filesProcessed = 0;
         const processingPromises = [];
 
-        // Process the zip file with better error handling
-        try {
-            await new Promise((resolve, reject) => {
-                const unzipStream = stream.pipe(unzipper.Parse());
-                
-                unzipStream.on('entry', (entry) => {
-                    if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
-                        console.log(`\n📄 Found XML file: ${entry.path}`);
-                        
-                        const promise = processXmlStream(entry, entry.path)
-                            .then(projects => {
-                                allRailwayProjects.push(...projects);
-                                filesProcessed++;
-                                console.log(`✓ Added ${projects.length} projects from ${entry.path} (Total so far: ${allRailwayProjects.length})`);
-                            })
-                            .catch(e => {
-                                console.error(`✗ Error processing ${entry.path}:`, e.message);
-                            });
-                        
-                        processingPromises.push(promise);
-                    } else {
-                        entry.autodrain();
-                    }
-                });
-                
-                unzipStream.on('error', (err) => {
-                    console.error('Unzip stream error:', err);
-                    reject(err);
-                });
-                
-                unzipStream.on('close', () => {
-                    console.log('\n✓ Unzip stream closed');
-                    resolve();
-                });
-            });
-        } catch (unzipError) {
-            console.error('Error during unzip:', unzipError);
-            throw unzipError;
-        }
+        await stream.pipe(unzipper.Parse()).on('entry', (entry) => {
+            if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
+                console.log(`\n📄 Processing XML file: ${entry.path}`);
+                const promise = processXmlStream(entry, entry.path)
+                    .then(projects => {
+                        allRailwayProjects.push(...projects);
+                        filesProcessed++;
+                    })
+                    .catch(e => {
+                        console.error(`✗ Error processing ${entry.path}:`, e.message);
+                    });
+                processingPromises.push(promise);
+            } else {
+                entry.autodrain();
+            }
+        }).promise();
 
         // Wait for all XML processing to complete
-        console.log(`\nWaiting for ${processingPromises.length} XML files to complete processing...`);
         await Promise.all(processingPromises);
 
         console.log(`\n=== XML Processing complete: ${filesProcessed} files ===`);
         console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
-        console.log(`Time elapsed: ${((Date.now() - startTime) / 1000).toFixed(2)}s`);
         
-        console.log('\nFetching Pipedrive leads...');
         const pipedriveLeads = await fetchAllPipedriveLeads(pipedriveToken);
-        
-        console.log('\nMatching leads with projects...');
         const matches = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
 
         const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -416,5 +396,4 @@ app.post('/process', upload.single('file'), async (req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
-    console.log(`Max heap size: ${process.env.NODE_OPTIONS || 'default'}`);
 });
