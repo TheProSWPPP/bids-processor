@@ -64,15 +64,42 @@ function mapProjectStage(stage) {
     return stage;
 }
 
+// *** FIXED: This function now correctly merges company data from duplicate projects ***
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     const railwayProjectMap = new Map();
+
     railwayProjects.forEach(p => {
         const projectId = extractProjectId(p.URL);
-        if (projectId) {
+        if (!projectId) return;
+
+        if (railwayProjectMap.has(projectId)) {
+            // Project already exists, so we merge the company lists.
+            const existingProject = railwayProjectMap.get(projectId);
+            const existingCompanyIds = new Set(existingProject.companies.map(c => c.CompanyID));
+
+            // Add any new companies that aren't already in the existing list
+            if (p.companies) {
+                p.companies.forEach(newCompany => {
+                    if (!existingCompanyIds.has(newCompany.CompanyID)) {
+                        existingProject.companies.push(newCompany);
+                        existingCompanyIds.add(newCompany.CompanyID);
+                    }
+                });
+            }
+
+            // Update the main project record if the new one is more recent
+            if (new Date(p.UpdateDate) > new Date(existingProject.UpdateDate)) {
+                const mergedCompanies = existingProject.companies; // Preserve the merged list
+                Object.assign(existingProject, p, { companies: mergedCompanies });
+            }
+        } else {
+            // First time seeing this project, add it to the map
             railwayProjectMap.set(projectId, p);
         }
     });
-    console.log(`Railway projects mapped: ${railwayProjectMap.size}`);
+    // *** END FIX ***
+
+    console.log(`Railway projects mapped (after merging): ${railwayProjectMap.size}`);
     const matches = [];
     for (const lead of pipedriveLeads) {
         const pipedriveUrl = lead["3fea11727cd0340a9eb1c3d18e0d4d15151fad38"];
@@ -174,6 +201,7 @@ function cleanProject(project) {
         }));
     };
 
+    cleanedProject.companies = []; // Initialize as empty
     if (project.Companies && project.Companies.Company) {
         const companiesRaw = Array.isArray(project.Companies.Company) ? project.Companies.Company : [project.Companies.Company];
         
