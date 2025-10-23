@@ -136,24 +136,33 @@ async function processXmlStream(stream, fileName) {
         const xml = new XmlStream(stream);
         
         let projectCount = 0;
+        let lastLog = Date.now();
 
         xml.on('endElement: Project', (project) => {
             projectCount++;
-            if (projectCount % 1000 === 0) {
+            
+            // Log every 1000 projects OR every 5 seconds
+            const now = Date.now();
+            if (projectCount % 1000 === 0 || now - lastLog > 5000) {
                 console.log(`Processing ${fileName}: ${projectCount} projects...`);
+                lastLog = now;
             }
 
-            const cleanedProject = cleanProject(project);
-            projects.push(cleanedProject);
+            try {
+                const cleanedProject = cleanProject(project);
+                projects.push(cleanedProject);
+            } catch (err) {
+                console.error(`Error cleaning project ${projectCount} in ${fileName}:`, err.message);
+            }
         });
 
         xml.on('end', () => {
-            console.log(`Completed ${fileName}: ${projects.length} projects total`);
+            console.log(`✓ Completed ${fileName}: ${projects.length} projects total`);
             resolve(projects);
         });
 
         xml.on('error', (err) => {
-            console.error(`Stream error for ${fileName}:`, err.message);
+            console.error(`✗ Stream error for ${fileName}:`, err.message);
             reject(err);
         });
     });
@@ -221,7 +230,7 @@ function cleanProject(project) {
 
             return {
                 ...company.$,
-                email: company.Email, // Correctly captures company email
+                email: company.Email,
                 website: company.Website,
                 contacts: getContacts(company),
                 address: getAddress(company),
@@ -239,14 +248,18 @@ function cleanProject(project) {
 
 app.post('/process', upload.single('file'), async (req, res) => {
     console.log('=== Request received ===');
+    const startTime = Date.now();
+    
     try {
         if (!req.file) {
             return res.status(400).json({
                 error: 'No file uploaded'
             });
         }
+        
         const pipedriveToken = '3089d0ffb03a7f996c5f10156fd4ebfaad9fca28';
         console.log(`Processing file: ${req.file.originalname} (${req.file.size} bytes)`);
+        console.log('Starting unzip...');
         
         const allRailwayProjects = [];
         const stream = Readable.from(req.file.buffer);
@@ -254,30 +267,62 @@ app.post('/process', upload.single('file'), async (req, res) => {
         let filesProcessed = 0;
         const processingPromises = [];
 
-        const unzipperStream = stream.pipe(unzipper.Parse());
-
-        // Use a for...await...of loop for better stream handling
-        for await (const entry of unzipperStream) {
-            if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
-                console.log(`Processing XML file: ${entry.path}`);
-                try {
-                    const projects = await processXmlStream(entry, entry.path);
-                    allRailwayProjects.push(...projects);
-                    filesProcessed++;
-                } catch (e) {
-                    console.error(`Parse error for ${entry.path}:`, e.message);
-                    entry.autodrain(); // Ensure stream continues
-                }
-            } else {
-                entry.autodrain();
-            }
+        // Process the zip file with better error handling
+        try {
+            await new Promise((resolve, reject) => {
+                const unzipStream = stream.pipe(unzipper.Parse());
+                
+                unzipStream.on('entry', (entry) => {
+                    if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
+                        console.log(`\n📄 Found XML file: ${entry.path}`);
+                        
+                        const promise = processXmlStream(entry, entry.path)
+                            .then(projects => {
+                                allRailwayProjects.push(...projects);
+                                filesProcessed++;
+                                console.log(`✓ Added ${projects.length} projects from ${entry.path} (Total so far: ${allRailwayProjects.length})`);
+                            })
+                            .catch(e => {
+                                console.error(`✗ Error processing ${entry.path}:`, e.message);
+                            });
+                        
+                        processingPromises.push(promise);
+                    } else {
+                        entry.autodrain();
+                    }
+                });
+                
+                unzipStream.on('error', (err) => {
+                    console.error('Unzip stream error:', err);
+                    reject(err);
+                });
+                
+                unzipStream.on('close', () => {
+                    console.log('\n✓ Unzip stream closed');
+                    resolve();
+                });
+            });
+        } catch (unzipError) {
+            console.error('Error during unzip:', unzipError);
+            throw unzipError;
         }
 
-        console.log(`=== Processing complete: ${filesProcessed} XML files ===`);
+        // Wait for all XML processing to complete
+        console.log(`\nWaiting for ${processingPromises.length} XML files to complete processing...`);
+        await Promise.all(processingPromises);
+
+        console.log(`\n=== XML Processing complete: ${filesProcessed} files ===`);
         console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
+        console.log(`Time elapsed: ${((Date.now() - startTime) / 1000).toFixed(2)}s`);
         
+        console.log('\nFetching Pipedrive leads...');
         const pipedriveLeads = await fetchAllPipedriveLeads(pipedriveToken);
+        
+        console.log('\nMatching leads with projects...');
         const matches = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
+
+        const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`\n=== COMPLETE: Total time ${totalTime}s ===`);
 
         res.json({
             success: true,
@@ -285,12 +330,16 @@ app.post('/process', upload.single('file'), async (req, res) => {
             totalProjects: allRailwayProjects.length,
             totalLeads: pipedriveLeads.length,
             matchesFound: matches.length,
+            processingTime: totalTime + 's',
             matches: matches
         });
     } catch (error) {
-        console.error('=== FATAL ERROR ===', error);
+        console.error('\n=== FATAL ERROR ===');
+        console.error('Error message:', error.message);
+        console.error('Stack trace:', error.stack);
         res.status(500).json({
-            error: error.message
+            error: error.message,
+            stack: error.stack
         });
     }
 });
@@ -298,4 +347,5 @@ app.post('/process', upload.single('file'), async (req, res) => {
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
+    console.log(`Max heap size: ${process.memoryUsage().heapTotal / 1024 / 1024}MB`);
 });
