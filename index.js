@@ -1,7 +1,8 @@
 const express = require('express');
 const multer = require('multer');
 const unzipper = require('unzipper');
-const xml2js = require('xml2js');
+const XmlStream = require('xml-stream');
+const { Readable } = require('stream');
 
 const app = express();
 const upload = multer({
@@ -10,7 +11,6 @@ const upload = multer({
         fileSize: 100 * 1024 * 1024 // 100MB limit
     }
 });
-const parser = new xml2js.Parser();
 
 app.use(express.json());
 
@@ -67,7 +67,6 @@ function mapProjectStage(stage) {
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     const railwayProjectMap = new Map();
     railwayProjects.forEach(p => {
-        // The project object now has URL directly from the attributes
         const projectId = extractProjectId(p.URL);
         if (projectId) {
             railwayProjectMap.set(projectId, p);
@@ -82,7 +81,7 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
             if (!pipedriveProjectId || !railwayProjectMap.has(pipedriveProjectId)) continue;
 
             const matchedProject = railwayProjectMap.get(pipedriveProjectId);
-            const railwayMappedStage = mapProjectStage(matchedProject.Stage); // Note: Property name is now 'Stage'
+            const railwayMappedStage = mapProjectStage(matchedProject.Stage);
             const pipedriveStage = lead["7c1852c27664d1118f75660223a6af9e99d10f2c"];
 
             if (pipedriveStage !== railwayMappedStage) {
@@ -102,6 +101,115 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     return matches;
 }
 
+/**
+ * Process XML file using streaming parser to handle large files
+ */
+async function processXmlStream(stream, fileName) {
+    return new Promise((resolve, reject) => {
+        const projects = [];
+        const xml = new XmlStream(stream);
+        
+        let projectCount = 0;
+
+        xml.on('endElement: Project', (project) => {
+            projectCount++;
+            if (projectCount % 1000 === 0) {
+                console.log(`Processing ${fileName}: ${projectCount} projects...`);
+            }
+
+            const cleanedProject = cleanProject(project);
+            projects.push(cleanedProject);
+        });
+
+        xml.on('end', () => {
+            console.log(`Completed ${fileName}: ${projects.length} projects total`);
+            resolve(projects);
+        });
+
+        xml.on('error', (err) => {
+            console.error(`Stream error for ${fileName}:`, err.message);
+            reject(err);
+        });
+    });
+}
+
+/**
+ * Clean a single project node from the XML stream
+ */
+function cleanProject(project) {
+    const cleanedProject = { ...project.$ };
+
+    const getContacts = (c) => {
+        if (!c || !c.Contacts || !c.Contacts.Contact) return [];
+        const contacts = Array.isArray(c.Contacts.Contact) ? c.Contacts.Contact : [c.Contacts.Contact];
+        return contacts.map(contact => ({
+            ...contact.$,
+            ...(contact.Email && { email: contact.Email }),
+            ...(contact.PhoneNumber && { phone: contact.PhoneNumber }),
+            ...(contact.LinkedInURL && { linkedin: contact.LinkedInURL }),
+        }));
+    };
+
+    const getAddress = (c) => {
+        if (!c || !c.Addresses || !c.Addresses.Address) return null;
+        const addressRaw = Array.isArray(c.Addresses.Address) ? c.Addresses.Address[0] : c.Addresses.Address;
+        if (!addressRaw) return null;
+        return {
+            ...addressRaw.$,
+            addressLine1: addressRaw.AddressLine1,
+            addressLine2: addressRaw.AddressLine2,
+            city: addressRaw.City,
+            state: addressRaw.StateProvince,
+            zip: addressRaw.ZipPostalCode,
+            county: addressRaw.County,
+        };
+    };
+
+    const getPhones = (c) => {
+        if (!c || !c.Phones || !c.Phones.Phone) return [];
+        const phones = Array.isArray(c.Phones.Phone) ? c.Phones.Phone : [c.Phones.Phone];
+        return phones.map(phone => ({
+            type: phone.$?.PhoneType,
+            number: phone.$children?.[0] || phone._
+        }));
+    };
+
+    if (project.Companies && project.Companies.Company) {
+        const companiesRaw = Array.isArray(project.Companies.Company) ? project.Companies.Company : [project.Companies.Company];
+        
+        cleanedProject.companies = companiesRaw.map(company => {
+            const classifications = [];
+            if (company.ClassificationTypes && company.ClassificationTypes.ClassificationType) {
+                const classificationsRaw = Array.isArray(company.ClassificationTypes.ClassificationType) 
+                    ? company.ClassificationTypes.ClassificationType 
+                    : [company.ClassificationTypes.ClassificationType];
+                
+                classificationsRaw.forEach(ct => {
+                    classifications.push({
+                        rank: ct.$?.Rank,
+                        type: ct.$?.Type
+                    });
+                });
+            }
+
+            return {
+                ...company.$,
+                email: company.Email,
+                website: company.Website,
+                contacts: getContacts(company),
+                address: getAddress(company),
+                phones: getPhones(company),
+                classificationTypes: classifications
+            };
+        });
+    }
+
+    if (project.Valuation) cleanedProject.valuation = project.Valuation.$;
+    if (project.Parameters) cleanedProject.parameters = project.Parameters.$;
+
+    return cleanedProject;
+}
+
 app.post('/process', upload.single('file'), async (req, res) => {
     console.log('=== Request received ===');
     try {
@@ -112,53 +220,36 @@ app.post('/process', upload.single('file'), async (req, res) => {
         }
         const pipedriveToken = '3089d0ffb03a7f996c5f10156fd4ebfaad9fca28';
         console.log(`Processing file: ${req.file.originalname} (${req.file.size} bytes)`);
-        const xmlFiles = [];
-        const {
-            Readable
-        } = require('stream');
+        
+        const allRailwayProjects = [];
         const stream = Readable.from(req.file.buffer);
-        const processingPromises = [];
-        await stream.pipe(unzipper.Parse()).on('entry', (entry) => {
+        
+        let filesProcessed = 0;
+
+        await stream.pipe(unzipper.Parse()).on('entry', async (entry) => {
             if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
-                const processingPromise = new Promise((resolve) => {
-                    const chunks = [];
-                    entry.on('data', (chunk) => chunks.push(chunk)).on('end', async () => {
-                        try {
-                            const xml = Buffer.concat(chunks).toString('utf8');
-                            const parsed = await parser.parseStringPromise(xml);
-                            const cleaned = cleanProjectData(parsed);
-                            xmlFiles.push({
-                                fileName: entry.path,
-                                data: cleaned
-                            });
-                        } catch (e) {
-                            console.error(`Parse error for ${entry.path}:`, e.message);
-                        }
-                        resolve();
-                    }).on('error', (err) => {
-                        console.error(`Stream error for ${entry.path}:`, err.message);
-                        resolve();
-                    });
-                });
-                processingPromises.push(processingPromise);
+                console.log(`Processing XML file: ${entry.path}`);
+                try {
+                    const projects = await processXmlStream(entry, entry.path);
+                    allRailwayProjects.push(...projects);
+                    filesProcessed++;
+                } catch (e) {
+                    console.error(`Parse error for ${entry.path}:`, e.message);
+                }
             } else {
                 entry.autodrain();
             }
         }).promise();
-        await Promise.all(processingPromises);
-        console.log(`=== Processing complete: ${xmlFiles.length} XML files ===`);
-        const allRailwayProjects = [];
-        xmlFiles.forEach(file => {
-            if (file.data.projects && Array.isArray(file.data.projects)) {
-                allRailwayProjects.push(...file.data.projects);
-            }
-        });
+
+        console.log(`=== Processing complete: ${filesProcessed} XML files ===`);
         console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
+        
         const pipedriveLeads = await fetchAllPipedriveLeads(pipedriveToken);
         const matches = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
+
         res.json({
             success: true,
-            filesProcessed: xmlFiles.length,
+            filesProcessed: filesProcessed,
             totalProjects: allRailwayProjects.length,
             totalLeads: pipedriveLeads.length,
             matchesFound: matches.length,
@@ -172,100 +263,10 @@ app.post('/process', upload.single('file'), async (req, res) => {
     }
 });
 
-/**
- * Helper function to safely ensure a value is an array.
- */
-function ensureArray(data) {
-    if (!data) return [];
-    return Array.isArray(data) ? data : [data];
-}
-
-/**
- * Cleans the parsed XML data into a structured JSON format.
- * This version returns all available fields for every company in a single 'companies'
- * array, including all attributes and classification types, without attempting
- * to categorize them.
- */
-function cleanProjectData(data) {
-    if (!data.Projects || !data.Projects.Project) {
-        return data;
-    }
-
-    const projects = ensureArray(data.Projects.Project);
-
-    const cleanedProjects = projects.map(project => {
-        // Start with all top-level project attributes
-        const cleanedProject = { ...project.$ };
-
-        // Helper functions
-        const getContacts = (c) => {
-            const contactsRaw = ensureArray(c.Contacts?.[0]?.Contact);
-            return contactsRaw.map(contact => ({
-                ...contact.$, // Include all attributes like ContactID and Name
-                ...(contact.Email && { email: contact.Email[0] }),
-                ...(contact.PhoneNumber && { phone: contact.PhoneNumber[0] }),
-                ...(contact.LinkedInURL && { linkedin: contact.LinkedInURL[0] }),
-            }));
-        };
-
-        const getAddress = (c) => {
-            const addressRaw = ensureArray(c.Addresses?.[0]?.Address)[0];
-            if (!addressRaw) return null;
-            return {
-                ...addressRaw.$,
-                addressLine1: addressRaw.AddressLine1?.[0],
-                addressLine2: addressRaw.AddressLine2?.[0],
-                city: addressRaw.City?.[0],
-                state: addressRaw.StateProvince?.[0],
-                zip: addressRaw.ZipPostalCode?.[0],
-                county: addressRaw.County?.[0],
-            };
-        };
-
-        const getPhones = (c) => {
-            const phonesRaw = ensureArray(c.Phones?.[0]?.Phone);
-            return phonesRaw.map(phone => ({
-                type: phone.$?.PhoneType,
-                number: phone._
-            }));
-        };
-
-        const companiesRaw = ensureArray(project.Companies?.[0]?.Company);
-        
-        // Create a single 'companies' array
-        cleanedProject.companies = companiesRaw.map(company => {
-            const classificationsRaw = ensureArray(company.ClassificationTypes?.[0]?.ClassificationType);
-            const classifications = classificationsRaw.map(ct => ({
-                rank: ct.$?.Rank,
-                type: ct.$?.Type
-            }));
-
-            // Return a comprehensive company object
-            return {
-                ...company.$, // Captures all attributes like CompanyID, Role, BiddingRole
-                email: company.Email?.[0], // <<< ADD THIS LINE
-                website: company.Website?.[0],
-                contacts: getContacts(company),
-                address: getAddress(company),
-                phones: getPhones(company),
-                classificationTypes: classifications
-            };
-        });
-
-        // Add other project-level details if they exist
-        if(project.Valuation) cleanedProject.valuation = project.Valuation[0].$;
-        if(project.Parameters) cleanedProject.parameters = project.Parameters[0].$;
-
-        return cleanedProject;
-    });
-
-    return {
-        projects: cleanedProjects
-    };
-}
-
-
 const PORT = process.env.PORT || 3080;
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+});
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
 });
