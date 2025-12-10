@@ -14,6 +14,83 @@ const upload = multer({
 
 app.use(express.json());
 
+// Military/Government configuration
+const USACE_LABEL_ID = "af445200-52d4-11f0-9b10-b91edfc9ee3a";
+
+const militaryKeywords = [
+    'US Navy',
+    'Naval Facilities Engineering',
+    'NAVFAC',
+    'USACE',
+    'US Army Corps of Engineers',
+    'Army Corps of Engineers',
+    'US Army',
+    'U.S. Army',
+    'Air Force',
+    'US Air Force',
+    'U.S. Air Force',
+    'Marine Corps',
+    'US Marine Corps',
+    'U.S. Marine Corps',
+    'National Guard',
+    'Department of Defense',
+    'DOD',
+    'Department of the Navy',
+    'Department of the Army',
+    'Department of the Air Force'
+];
+
+function isMilitaryOwner(companyName) {
+    if (!companyName) return false;
+    const nameLower = companyName.toLowerCase();
+    return militaryKeywords.some(keyword => nameLower.includes(keyword.toLowerCase()));
+}
+
+function getMilitaryBranch(companyName) {
+    if (!companyName) return null;
+    const nameLower = companyName.toLowerCase();
+    
+    if (nameLower.includes('navy') || nameLower.includes('navfac') || nameLower.includes('naval facilities')) {
+        return 'US Navy';
+    }
+    if (nameLower.includes('usace') || nameLower.includes('army corps of engineers')) {
+        return 'USACE';
+    }
+    if (nameLower.includes('air force')) {
+        return 'US Air Force';
+    }
+    if (nameLower.includes('marine corps')) {
+        return 'US Marine Corps';
+    }
+    if (nameLower.includes('army') && !nameLower.includes('corps')) {
+        return 'US Army';
+    }
+    if (nameLower.includes('national guard')) {
+        return 'National Guard';
+    }
+    return 'Military/Government';
+}
+
+function checkMilitaryOwner(project) {
+    if (!project?.companies || !Array.isArray(project.companies)) {
+        return { hasMilitaryOwner: false, militaryBranch: null, militaryOwnerName: null };
+    }
+    
+    const militaryOwner = project.companies.find(company => 
+        company.Role === 'Owner' && isMilitaryOwner(company.Name)
+    );
+    
+    if (militaryOwner) {
+        return {
+            hasMilitaryOwner: true,
+            militaryOwnerName: militaryOwner.Name,
+            militaryBranch: getMilitaryBranch(militaryOwner.Name)
+        };
+    }
+    
+    return { hasMilitaryOwner: false, militaryBranch: null, militaryOwnerName: null };
+}
+
 app.get('/', (req, res) => {
     res.json({
         status: 'Zip processor is running'
@@ -64,25 +141,21 @@ function mapProjectStage(stage) {
     return stage;
 }
 
-// *** FIX START: Replaced the overwriting function with the correct merging function ***
 function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     const railwayProjectMap = new Map();
-    const projectOccurrences = new Map(); // Track how many times we see each project
+    const projectOccurrences = new Map();
 
     railwayProjects.forEach(p => {
         const projectId = extractProjectId(p.URL);
         if (!projectId) return;
 
-        // Track occurrences
         projectOccurrences.set(projectId, (projectOccurrences.get(projectId) || 0) + 1);
 
         if (railwayProjectMap.has(projectId)) {
-            // Project exists, so merge companies
             const existingProject = railwayProjectMap.get(projectId);
             const beforeCount = existingProject.companies.length;
             const existingCompanyIds = new Set(existingProject.companies.map(c => c.CompanyID));
 
-            // Add new, unique companies from the current project 'p'
             if (p.companies) {
                 p.companies.forEach(newCompany => {
                     if (!existingCompanyIds.has(newCompany.CompanyID)) {
@@ -97,18 +170,15 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
                 console.log(`  Merged companies for project ${projectId}: ${beforeCount} → ${afterCount}`);
             }
 
-            // Update the main project record if the new one is more recent
             if (new Date(p.UpdateDate) > new Date(existingProject.UpdateDate)) {
-                const mergedCompanies = existingProject.companies; // Keep the merged company list
+                const mergedCompanies = existingProject.companies;
                 Object.assign(existingProject, p, { companies: mergedCompanies });
             }
         } else {
-            // First time seeing this project, add it to the map
             railwayProjectMap.set(projectId, p);
         }
     });
 
-    // Log projects that appeared multiple times
     const duplicates = Array.from(projectOccurrences.entries()).filter(([id, count]) => count > 1);
     if (duplicates.length > 0) {
         console.log(`\n📊 Projects with multiple entries (company merging happened):`);
@@ -125,6 +195,8 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
 
     console.log(`Railway projects mapped (after merging): ${railwayProjectMap.size}`);
     const matches = [];
+    const newUsaceDetected = [];
+    
     for (const lead of pipedriveLeads) {
         const pipedriveUrl = lead["3fea11727cd0340a9eb1c3d18e0d4d15151fad38"];
         if (pipedriveUrl) {
@@ -134,6 +206,22 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
             const matchedProject = railwayProjectMap.get(pipedriveProjectId);
             const railwayMappedStage = mapProjectStage(matchedProject.Stage);
             const pipedriveStage = lead["7c1852c27664d1118f75660223a6af9e99d10f2c"];
+            
+            // Check for military owner
+            const militaryCheck = checkMilitaryOwner(matchedProject);
+            
+            // Check if this is a NEW military detection (not already flagged)
+            const alreadyFlagged = (lead.label_ids || []).includes(USACE_LABEL_ID);
+            
+            if (militaryCheck.hasMilitaryOwner && !alreadyFlagged) {
+                newUsaceDetected.push({
+                    lead,
+                    matchedProject,
+                    projectId: pipedriveProjectId,
+                    militaryBranch: militaryCheck.militaryBranch,
+                    militaryOwnerName: militaryCheck.militaryOwnerName
+                });
+            }
 
             if (pipedriveStage !== railwayMappedStage) {
                 matches.push({
@@ -148,10 +236,19 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
             }
         }
     }
+    
     console.log(`Matches with DIFFERENT stages found: ${matches.length}`);
-    return matches;
+    console.log(`🏛️  New military/government owners detected (not already flagged): ${newUsaceDetected.length}`);
+    
+    if (newUsaceDetected.length > 0) {
+        console.log(`\n🏛️  NEW USACE/MILITARY PROJECTS:`);
+        newUsaceDetected.forEach(item => {
+            console.log(`  - ${item.militaryBranch}: ${item.militaryOwnerName} (Lead: ${item.lead.id})`);
+        });
+    }
+    
+    return { matches, newUsaceDetected };
 }
-// *** FIX END ***
 
 async function processXmlStream(stream, fileName) {
     return new Promise((resolve, reject) => {
@@ -248,16 +345,14 @@ function cleanProject(project, debug = false) {
         };
     };
 
-    // *** FIX START: Corrected how the phone number is extracted ***
     const getPhones = (c) => {
         if (!c || !c.Phones || !c.Phones.Phone) return [];
         const phones = Array.isArray(c.Phones.Phone) ? c.Phones.Phone : [c.Phones.Phone];
         return phones.map(phone => ({
             type: phone.$?.PhoneType,
-            number: phone.$text // Use $text for xml-stream
+            number: phone.$text
         }));
     };
-    // *** FIX END ***
 
     const getParticipantRoles = (c) => {
         if (!c || !c.ParticipantRoles || !c.ParticipantRoles.ParticipantRole) return [];
@@ -361,14 +456,13 @@ app.post('/process', upload.single('file'), async (req, res) => {
             }
         }).promise();
 
-        // Wait for all XML processing to complete
         await Promise.all(processingPromises);
 
         console.log(`\n=== XML Processing complete: ${filesProcessed} files ===`);
         console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
         
         const pipedriveLeads = await fetchAllPipedriveLeads(pipedriveToken);
-        const matches = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
+        const { matches, newUsaceDetected } = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
 
         const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
         console.log(`\n=== COMPLETE: Total time ${totalTime}s ===`);
@@ -380,7 +474,8 @@ app.post('/process', upload.single('file'), async (req, res) => {
             totalLeads: pipedriveLeads.length,
             matchesFound: matches.length,
             processingTime: totalTime + 's',
-            matches: matches
+            matches: matches,
+            newUsaceDetected: newUsaceDetected
         });
     } catch (error) {
         console.error('\n=== FATAL ERROR ===');
