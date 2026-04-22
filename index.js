@@ -2,6 +2,7 @@ const express = require('express');
 const multer = require('multer');
 const unzipper = require('unzipper');
 const XmlStream = require('xml-stream');
+const ftp = require('basic-ftp');
 const { Readable } = require('stream');
 
 const app = express();
@@ -49,7 +50,7 @@ function isMilitaryOwner(companyName) {
 function getMilitaryBranch(companyName) {
     if (!companyName) return null;
     const nameLower = companyName.toLowerCase();
-    
+
     if (nameLower.includes('navy') || nameLower.includes('navfac') || nameLower.includes('naval facilities')) {
         return 'US Navy';
     }
@@ -75,11 +76,11 @@ function checkMilitaryOwner(project) {
     if (!project?.companies || !Array.isArray(project.companies)) {
         return { hasMilitaryOwner: false, militaryBranch: null, militaryOwnerName: null };
     }
-    
-    const militaryOwner = project.companies.find(company => 
+
+    const militaryOwner = project.companies.find(company =>
         company.Role === 'Owner' && isMilitaryOwner(company.Name)
     );
-    
+
     if (militaryOwner) {
         return {
             hasMilitaryOwner: true,
@@ -87,7 +88,7 @@ function checkMilitaryOwner(project) {
             militaryBranch: getMilitaryBranch(militaryOwner.Name)
         };
     }
-    
+
     return { hasMilitaryOwner: false, militaryBranch: null, militaryOwnerName: null };
 }
 
@@ -196,7 +197,7 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
     console.log(`Railway projects mapped (after merging): ${railwayProjectMap.size}`);
     const matches = [];
     const newUsaceDetected = [];
-    
+
     for (const lead of pipedriveLeads) {
         const pipedriveUrl = lead["3fea11727cd0340a9eb1c3d18e0d4d15151fad38"];
         if (pipedriveUrl) {
@@ -206,13 +207,13 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
             const matchedProject = railwayProjectMap.get(pipedriveProjectId);
             const railwayMappedStage = mapProjectStage(matchedProject.Stage);
             const pipedriveStage = lead["7c1852c27664d1118f75660223a6af9e99d10f2c"];
-            
+
             // Check for military owner
             const militaryCheck = checkMilitaryOwner(matchedProject);
-            
+
             // Check if this is a NEW military detection (not already flagged)
             const alreadyFlagged = (lead.label_ids || []).includes(USACE_LABEL_ID);
-            
+
             if (militaryCheck.hasMilitaryOwner && !alreadyFlagged) {
                 newUsaceDetected.push({
                     lead,
@@ -236,17 +237,17 @@ function matchLeadsWithProjects(pipedriveLeads, railwayProjects) {
             }
         }
     }
-    
+
     console.log(`Matches with DIFFERENT stages found: ${matches.length}`);
     console.log(`🏛️  New military/government owners detected (not already flagged): ${newUsaceDetected.length}`);
-    
+
     if (newUsaceDetected.length > 0) {
         console.log(`\n🏛️  NEW USACE/MILITARY PROJECTS:`);
         newUsaceDetected.forEach(item => {
             console.log(`  - ${item.militaryBranch}: ${item.militaryOwnerName} (Lead: ${item.lead.id})`);
         });
     }
-    
+
     return { matches, newUsaceDetected };
 }
 
@@ -254,7 +255,7 @@ async function processXmlStream(stream, fileName) {
     return new Promise((resolve, reject) => {
         const projects = [];
         const xml = new XmlStream(stream);
-        
+
         xml.collect('Company');
         xml.collect('Contact');
         xml.collect('Address');
@@ -262,13 +263,13 @@ async function processXmlStream(stream, fileName) {
         xml.collect('ClassificationType');
         xml.collect('ParticipantRole');
         xml.collect('Bidder');
-        
+
         let projectCount = 0;
         let lastLog = Date.now();
 
         xml.on('endElement: Project', (project) => {
             projectCount++;
-            
+
             const now = Date.now();
             if (projectCount % 1000 === 0 || now - lastLog > 5000) {
                 console.log(`Processing ${fileName}: ${projectCount} projects...`);
@@ -300,12 +301,12 @@ function cleanProject(project, debug = false) {
 
     if (debug && project.Companies) {
         console.log(`\n=== DEBUG Project ${cleanedProject.ProjectID} ===`);
-        
+
         if (project.Companies.Company) {
             const isArray = Array.isArray(project.Companies.Company);
             const count = isArray ? project.Companies.Company.length : 1;
             console.log(`Companies.Company is ${isArray ? 'ARRAY' : 'OBJECT'} with ${count} item(s)`);
-            
+
             if (isArray && project.Companies.Company.length > 0) {
                 console.log('First 3 companies:');
                 project.Companies.Company.slice(0, 3).forEach((c, i) => {
@@ -369,18 +370,18 @@ function cleanProject(project, debug = false) {
     cleanedProject.companies = [];
     if (project.Companies && project.Companies.Company) {
         const companiesRaw = Array.isArray(project.Companies.Company) ? project.Companies.Company : [project.Companies.Company];
-        
+
         if (debug) {
             console.log(`Processing ${companiesRaw.length} companies for project ${cleanedProject.ProjectID}`);
         }
-        
+
         cleanedProject.companies = companiesRaw.map((company, idx) => {
             const classifications = [];
             if (company.ClassificationTypes && company.ClassificationTypes.ClassificationType) {
-                const classificationsRaw = Array.isArray(company.ClassificationTypes.ClassificationType) 
-                    ? company.ClassificationTypes.ClassificationType 
+                const classificationsRaw = Array.isArray(company.ClassificationTypes.ClassificationType)
+                    ? company.ClassificationTypes.ClassificationType
                     : [company.ClassificationTypes.ClassificationType];
-                
+
                 classificationsRaw.forEach(ct => {
                     classifications.push({
                         rank: ct.$?.Rank,
@@ -400,14 +401,14 @@ function cleanProject(project, debug = false) {
                 participantRoles: getParticipantRoles(company),
                 bidderRoles: getBidderRoles(company)
             };
-            
+
             if (debug) {
                 console.log(`  Company ${idx + 1}/${companiesRaw.length}: ${company.$?.Name || 'Unknown'} (${company.$?.Role || company.$?.BiddingRole || 'No role'}) - Email: ${company.Email || 'NONE'}`);
             }
-            
+
             return cleanedCompany;
         });
-        
+
         if (debug) {
             console.log(`✓ Extracted ${cleanedProject.companies.length} companies for project ${cleanedProject.ProjectID}\n`);
         }
@@ -419,63 +420,75 @@ function cleanProject(project, debug = false) {
     return cleanedProject;
 }
 
+async function runPipeline(zipReadable, pipedriveToken) {
+    const allRailwayProjects = [];
+    const processingPromises = [];
+    let filesProcessed = 0;
+
+    await zipReadable.pipe(unzipper.Parse()).on('entry', (entry) => {
+        if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
+            console.log(`\n📄 Processing XML file: ${entry.path}`);
+            const promise = processXmlStream(entry, entry.path)
+                .then(projects => {
+                    allRailwayProjects.push(...projects);
+                    filesProcessed++;
+                })
+                .catch(e => {
+                    console.error(`✗ Error processing ${entry.path}:`, e.message);
+                });
+            processingPromises.push(promise);
+        } else {
+            entry.autodrain();
+        }
+    }).promise();
+
+    await Promise.all(processingPromises);
+
+    console.log(`\n=== XML Processing complete: ${filesProcessed} files ===`);
+    console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
+
+    const pipedriveLeads = await fetchAllPipedriveLeads(pipedriveToken);
+    const { matches, newUsaceDetected } = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
+
+    return {
+        filesProcessed,
+        totalProjects: allRailwayProjects.length,
+        totalLeads: pipedriveLeads.length,
+        matchesFound: matches.length,
+        matches,
+        newUsaceDetected
+    };
+}
+
+function formatToday() {
+    const d = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+}
+
 app.post('/process', upload.single('file'), async (req, res) => {
     console.log('=== Request received ===');
     const startTime = Date.now();
-    
+
     try {
         if (!req.file) {
             return res.status(400).json({
                 error: 'No file uploaded'
             });
         }
-        
+
         const pipedriveToken = '3089d0ffb03a7f996c5f10156fd4ebfaad9fca28';
         console.log(`Processing file: ${req.file.originalname} (${req.file.size} bytes)`);
-        
-        const allRailwayProjects = [];
-        const stream = Readable.from(req.file.buffer);
-        
-        let filesProcessed = 0;
-        const processingPromises = [];
 
-        await stream.pipe(unzipper.Parse()).on('entry', (entry) => {
-            if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
-                console.log(`\n📄 Processing XML file: ${entry.path}`);
-                const promise = processXmlStream(entry, entry.path)
-                    .then(projects => {
-                        allRailwayProjects.push(...projects);
-                        filesProcessed++;
-                    })
-                    .catch(e => {
-                        console.error(`✗ Error processing ${entry.path}:`, e.message);
-                    });
-                processingPromises.push(promise);
-            } else {
-                entry.autodrain();
-            }
-        }).promise();
-
-        await Promise.all(processingPromises);
-
-        console.log(`\n=== XML Processing complete: ${filesProcessed} files ===`);
-        console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
-        
-        const pipedriveLeads = await fetchAllPipedriveLeads(pipedriveToken);
-        const { matches, newUsaceDetected } = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
+        const result = await runPipeline(Readable.from(req.file.buffer), pipedriveToken);
 
         const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
         console.log(`\n=== COMPLETE: Total time ${totalTime}s ===`);
 
         res.json({
             success: true,
-            filesProcessed: filesProcessed,
-            totalProjects: allRailwayProjects.length,
-            totalLeads: pipedriveLeads.length,
-            matchesFound: matches.length,
-            processingTime: totalTime + 's',
-            matches: matches,
-            newUsaceDetected: newUsaceDetected
+            ...result,
+            processingTime: totalTime + 's'
         });
     } catch (error) {
         console.error('\n=== FATAL ERROR ===');
@@ -485,6 +498,101 @@ app.post('/process', upload.single('file'), async (req, res) => {
             error: error.message,
             stack: error.stack
         });
+    }
+});
+
+app.post('/process-ftp', async (req, res) => {
+    console.log('=== /process-ftp request received ===');
+    const startTime = Date.now();
+
+    if (!process.env.FTP_HOST || !process.env.FTP_USER || !process.env.FTP_PASSWORD) {
+        return res.status(500).json({ error: 'FTP_HOST / FTP_USER / FTP_PASSWORD env vars not set' });
+    }
+
+    const client = new ftp.Client(0);
+    client.ftp.verbose = false;
+    try {
+        const date = req.body?.date || formatToday();
+        const remotePath = req.body?.path || `/Xpress_105622/1.4_DL_XpressSW3P_XML_${date}.zip`;
+        const pipedriveToken = '3089d0ffb03a7f996c5f10156fd4ebfaad9fca28';
+
+        console.log(`Connecting to FTP ${process.env.FTP_HOST}, fetching ${remotePath}`);
+
+        await client.access({
+            host: process.env.FTP_HOST,
+            port: Number(process.env.FTP_PORT) || 21,
+            user: process.env.FTP_USER,
+            password: process.env.FTP_PASSWORD,
+            secure: process.env.FTP_SECURE === 'true',
+        });
+
+        const zipStream = unzipper.Parse();
+        const pipelinePromise = (async () => {
+            const allRailwayProjects = [];
+            const processingPromises = [];
+            let filesProcessed = 0;
+
+            zipStream.on('entry', (entry) => {
+                if (entry.type === 'File' && entry.path.toLowerCase().endsWith('.xml')) {
+                    console.log(`\n📄 Processing XML file: ${entry.path}`);
+                    const promise = processXmlStream(entry, entry.path)
+                        .then(projects => {
+                            allRailwayProjects.push(...projects);
+                            filesProcessed++;
+                        })
+                        .catch(e => {
+                            console.error(`✗ Error processing ${entry.path}:`, e.message);
+                        });
+                    processingPromises.push(promise);
+                } else {
+                    entry.autodrain();
+                }
+            });
+
+            await new Promise((resolve, reject) => {
+                zipStream.on('close', resolve);
+                zipStream.on('error', reject);
+            });
+            await Promise.all(processingPromises);
+
+            console.log(`\n=== XML Processing complete: ${filesProcessed} files ===`);
+            console.log(`Total Railway projects extracted: ${allRailwayProjects.length}`);
+
+            const pipedriveLeads = await fetchAllPipedriveLeads(pipedriveToken);
+            const { matches, newUsaceDetected } = matchLeadsWithProjects(pipedriveLeads, allRailwayProjects);
+
+            return {
+                filesProcessed,
+                totalProjects: allRailwayProjects.length,
+                totalLeads: pipedriveLeads.length,
+                matchesFound: matches.length,
+                matches,
+                newUsaceDetected
+            };
+        })();
+
+        await client.downloadTo(zipStream, remotePath);
+        const result = await pipelinePromise;
+
+        const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
+        console.log(`\n=== COMPLETE: Total time ${totalTime}s ===`);
+
+        res.json({
+            success: true,
+            source: remotePath,
+            ...result,
+            processingTime: totalTime + 's'
+        });
+    } catch (error) {
+        console.error('\n=== FATAL ERROR (/process-ftp) ===');
+        console.error('Error message:', error.message);
+        console.error('Stack trace:', error.stack);
+        res.status(500).json({
+            error: error.message,
+            stack: error.stack
+        });
+    } finally {
+        client.close();
     }
 });
 
