@@ -479,6 +479,16 @@ const COMPANY_KEEP_FIELDS = [
     'website', 'email', 'contacts', 'address', 'phones'
 ];
 
+// Mirrors the "Get Awarded Contractor" n8n code node: contacts are only consumed
+// for the company that ends up being the awarded GC, so we drop contacts on the
+// rest to shrink the payload ~90% without affecting downstream logic.
+function isAwardedCandidate(companies, company) {
+    if (companies.length === 1) return true;
+    if (company.Role === 'General Contractor') return true;
+    if (company.BiddingRole === 'General Contractor') return true;
+    return false;
+}
+
 const PROJECT_KEEP_FIELDS = ['Title', 'URL', 'Stage', 'companies'];
 
 function pick(obj, keys) {
@@ -495,7 +505,12 @@ function pick(obj, keys) {
 function trimForN8n(result) {
     const matches = (result.matches || []).map((m) => {
         const mp = m.matchedProject || {};
-        const companies = (mp.companies || []).map((c) => pick(c, COMPANY_KEEP_FIELDS));
+        const rawCompanies = mp.companies || [];
+        const companies = rawCompanies.map((c) => {
+            const picked = pick(c, COMPANY_KEEP_FIELDS);
+            if (!isAwardedCandidate(rawCompanies, c)) delete picked.contacts;
+            return picked;
+        });
         return {
             projectId: m.projectId,
             pipedriveStage: m.pipedriveStage,
