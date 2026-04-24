@@ -466,6 +466,54 @@ function formatToday() {
     return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
 }
 
+const LEAD_KEEP_FIELDS = [
+    'id',
+    'title',
+    'label_ids',
+    'organization_id',
+    '3fea11727cd0340a9eb1c3d18e0d4d15151fad38'
+];
+
+const COMPANY_KEEP_FIELDS = [
+    'Role', 'BiddingRole', 'CompanyID', 'Name', 'URL',
+    'website', 'email', 'contacts', 'address', 'phones'
+];
+
+const PROJECT_KEEP_FIELDS = ['Title', 'URL', 'Stage', 'companies'];
+
+function pick(obj, keys) {
+    if (!obj) return obj;
+    const out = {};
+    for (const k of keys) {
+        if (obj[k] !== undefined) out[k] = obj[k];
+    }
+    return out;
+}
+
+// Strips fields that no downstream n8n node reads — shrinks response ~60% and
+// prevents n8n worker OOM when triggered executions ingest the payload.
+function trimForN8n(result) {
+    const matches = (result.matches || []).map((m) => {
+        const mp = m.matchedProject || {};
+        const companies = (mp.companies || []).map((c) => pick(c, COMPANY_KEEP_FIELDS));
+        return {
+            projectId: m.projectId,
+            pipedriveStage: m.pipedriveStage,
+            railwayStage: m.railwayStage,
+            railwayMappedStage: m.railwayMappedStage,
+            stageChanged: m.stageChanged,
+            lead: pick(m.lead, LEAD_KEEP_FIELDS),
+            matchedProject: { ...pick(mp, PROJECT_KEEP_FIELDS), companies }
+        };
+    });
+
+    const newUsaceDetected = (result.newUsaceDetected || []).map((u) => ({
+        lead: pick(u.lead, ['id', 'label_ids'])
+    }));
+
+    return { matches, newUsaceDetected };
+}
+
 app.post('/process', upload.single('file'), async (req, res) => {
     console.log('=== Request received ===');
     const startTime = Date.now();
@@ -575,13 +623,13 @@ app.post('/process-ftp', async (req, res) => {
         const result = await pipelinePromise;
 
         const totalTime = ((Date.now() - startTime) / 1000).toFixed(2);
-        console.log(`\n=== COMPLETE: Total time ${totalTime}s ===`);
+        const trimmed = trimForN8n(result);
+        console.log(`\n=== COMPLETE: Total time ${totalTime}s | matches=${trimmed.matches.length} usace=${trimmed.newUsaceDetected.length} ===`);
 
         res.json({
             success: true,
             source: remotePath,
-            ...result,
-            processingTime: totalTime + 's'
+            ...trimmed
         });
     } catch (error) {
         console.error('\n=== FATAL ERROR (/process-ftp) ===');
